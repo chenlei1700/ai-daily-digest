@@ -2,6 +2,10 @@
 
 A Claude Code skill that collects daily AI-domain updates across 5 categories, deduplicates against prior days, ranks by importance, summarizes via Claude itself (no API call), and renders a tabbed HTML brief opened in your browser — **all from a single phrase like "AI 日报"**.
 
+![Sample HTML output](docs/screenshot.png)
+
+> Browse a [live sample HTML](examples/digest-example.html) (open in browser after clone) · or the [grep-friendly markdown wiki](examples/wiki-example.md) archive.
+
 ## What it does
 
 ```
@@ -27,6 +31,44 @@ When you say "AI 日报" / "今日 AI 简报" / "daily ai digest" in Claude Code
 | Claude Code | `anthropics/claude-code` releases + commits + r/ClaudeAI |
 
 Reddit sources are optional — see "Reddit fallback chain" below.
+
+## Sample output
+
+The HTML brief is a single-file, dependency-free page with 5 tabs:
+
+```
+┌─ AI Daily Digest ────────────────────────────────────────────┐
+│ 2026-05-19 · 共 66 条（已增量去重 0 条）                       │
+├──────────────────────────────────────────────────────────────┤
+│ [重要论文 15] [AI 新闻 15] [GitHub 热门 8]                     │
+│ [大模型动态 13] [Claude Code 15]                              │
+├──────────────────────────────────────────────────────────────┤
+│ ╭──────────────────────────────────────────────────╮ ★ 64.6 │
+│ │ DashAttention：可微的自适应稀疏分层注意力             │       │
+│ │ (DashAttention: Differentiable and Adaptive ...) │       │
+│ │ arXiv · Yuxiang Huang · 2026-05-18                │       │
+│ │ ─────────────────────────────────────────────    │       │
+│ │ ① 事实：提出端到端可微的稀疏分层注意力 ...           │       │
+│ │ ② 研究者视角：用 α-entmax 取代硬性 top-k ...        │       │
+│ │ ③ 工程师视角：值得做长上下文推理的团队 ...           │       │
+│ ╰──────────────────────────────────────────────────╯       │
+│ ╭──────────────────────────────────────────────────╮ ★ 198 │
+│ │ openclaw/openclaw — Your own personal AI assist...│       │
+│ │ ⚠️ [hype: "Any OS. Any Platform. The lobster way"]│       │
+│ ╰──────────────────────────────────────────────────╯       │
+│ ...                                                          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Three artifact files per day:
+
+| File | Purpose |
+|---|---|
+| [`examples/digest-example.html`](examples/digest-example.html) | Tabbed HTML brief — open in browser, no external dependencies |
+| [`examples/wiki-example.md`](examples/wiki-example.md) | Long-term grep-able markdown archive |
+| `output/digest-DATE.items.json` | Raw fetched items + scores (internal) |
+
+The HTML has a dark theme that respects your OS theme, displays Chinese titles with English originals in muted text, three-section deep summaries (`①` 事实 / `②` 研究者视角 / `③` 工程师视角) for top items, single-sentence briefs for the rest, and `⚠️ [hype: ...]` annotations when titles contain marketing buzzwords.
 
 ## Output
 
