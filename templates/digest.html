@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>AI Daily Digest · {{ date }}</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #181c24;
+    --border: #2a3140;
+    --text: #e6e8eb;
+    --muted: #8a93a3;
+    --accent: #7aa2f7;
+    --score-hi: #f5a96b;
+    --score-mid: #9ece6a;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font: 14px/1.55 -apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding: 28px 32px 12px; border-bottom: 1px solid var(--border); }
+  h1 { margin: 0; font-size: 22px; font-weight: 600; }
+  .meta { color: var(--muted); margin-top: 6px; font-size: 13px; }
+  nav { display: flex; gap: 4px; padding: 12px 32px 0;
+        border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  nav button {
+    background: transparent; color: var(--muted); border: none;
+    padding: 10px 16px; cursor: pointer; font-size: 14px;
+    border-bottom: 2px solid transparent; transition: all .15s;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  nav .count {
+    display: inline-block; background: var(--border); color: var(--muted);
+    border-radius: 10px; padding: 1px 8px; margin-left: 6px; font-size: 12px;
+  }
+  main { padding: 24px 32px 64px; max-width: 1100px; }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  .item {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; margin-bottom: 12px;
+  }
+  .item-head { display: flex; gap: 12px; align-items: baseline; }
+  .item-head a {
+    color: var(--text); text-decoration: none; font-weight: 500; flex: 1;
+    line-height: 1.4;
+  }
+  .item-head a:hover { color: var(--accent); }
+  .title-en {
+    color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 4px;
+  }
+  .score {
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    background: var(--border); padding: 2px 8px; border-radius: 4px;
+    color: var(--score-mid); white-space: nowrap;
+  }
+  .score.hi { color: var(--score-hi); }
+  .submeta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .summary {
+    margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border);
+    color: #c9cdd4; line-height: 1.6; white-space: pre-wrap;
+  }
+  .summary .hype-line {
+    display: inline-block; margin-top: 6px; color: #ffb86c;
+    background: rgba(255,184,108,.08); padding: 2px 8px; border-radius: 4px;
+    font-size: 13px;
+  }
+  .empty { color: var(--muted); padding: 32px; text-align: center; }
+  .login-banner {
+    margin: 16px 32px 0; padding: 14px 18px; border-radius: 8px;
+    background: rgba(245, 169, 107, 0.08);
+    border: 1px solid rgba(245, 169, 107, 0.35);
+    color: var(--text); display: flex; align-items: center; gap: 14px;
+    flex-wrap: wrap;
+  }
+  .login-banner .icon { font-size: 20px; }
+  .login-banner .text { flex: 1; min-width: 250px; line-height: 1.55; }
+  .login-banner .text strong { color: var(--score-hi); }
+  .login-banner .text code {
+    background: rgba(255,255,255,0.05); padding: 1px 5px; border-radius: 3px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+  }
+  .login-banner a.cta {
+    background: var(--score-hi); color: #1a1a1a; text-decoration: none;
+    padding: 8px 14px; border-radius: 6px; font-weight: 600; font-size: 13px;
+    white-space: nowrap; transition: filter .15s;
+  }
+  .login-banner a.cta:hover { filter: brightness(1.1); }
+  footer { color: var(--muted); padding: 12px 32px; font-size: 12px;
+           border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI Daily Digest</h1>
+  <div class="meta">{{ date }} · 共 {{ total_items }} 条（已增量去重 {{ deduped_count }} 条）</div>
+</header>
+{% if reddit_login_required %}
+<div class="login-banner">
+  <div class="icon">🔐</div>
+  <div class="text">
+    <strong>Reddit 数据未获取</strong> — 匿名访问被 Reddit 拒绝。
+    <br>
+    <strong>方案 A（推荐）</strong>：装 <a href="https://www.mozilla.org/firefox/" target="_blank" rel="noopener" style="color: var(--score-hi)">Firefox</a>，在 Firefox 里登录 reddit.com 一次（无需关浏览器、永久生效）。
+    <br>
+    <strong>方案 B（兜底）</strong>：在已登录的浏览器按 F12 → Application → Cookies → reddit.com，复制全部值，
+    用 <code>setx REDDIT_COOKIE "name1=val1; name2=val2; ..."</code> 设环境变量，重启 Claude Code 后重试。
+  </div>
+  <a class="cta" href="https://www.reddit.com/login" target="_blank" rel="noopener">前往登录 Reddit ↗</a>
+</div>
+{% endif %}
+<nav>
+  {% for cat in categories %}
+  <button class="tab {% if loop.first %}active{% endif %}" data-pane="{{ cat.key }}">
+    {{ cat.label }}<span class="count">{{ cat.entries|length }}</span>
+  </button>
+  {% endfor %}
+</nav>
+<main>
+  {% for cat in categories %}
+  <section class="pane {% if loop.first %}active{% endif %}" id="{{ cat.key }}">
+    {% if not cat.entries %}
+    <div class="empty">本类今日无新内容</div>
+    {% endif %}
+    {% for it in cat.entries %}
+    <article class="item">
+      <div class="item-head">
+        <a href="{{ it.url }}" target="_blank" rel="noopener">{{ it.title }}{% if it.title_original %}<span class="title-en">（{{ it.title_original }}）</span>{% endif %}</a>
+        <span class="score {% if it.score >= 50 %}hi{% endif %}">★ {{ '%.1f' % it.score }}</span>
+      </div>
+      <div class="submeta">
+        {{ it.source }}{% if it.author %} · {{ it.author }}{% endif %}
+        {% if it.published_at %} · {{ it.published_at[:10] }}{% endif %}
+        {% if it.raw_metrics.points %} · {{ it.raw_metrics.points }} pts{% endif %}
+        {% if it.raw_metrics.stars %} · ★{{ it.raw_metrics.stars }}{% endif %}
+        {% if it.raw_metrics.language %} · {{ it.raw_metrics.language }}{% endif %}
+      </div>
+      {% if it.llm_summary %}
+      <div class="summary">{{ it.llm_summary }}{% if it.hype_note %}
+<span class="hype-line">{{ it.hype_note }}</span>{% endif %}</div>
+      {% elif it.summary %}
+      <div class="summary" style="color: var(--muted)">{{ it.summary[:280] }}{% if it.summary|length > 280 %}…{% endif %}</div>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </section>
+  {% endfor %}
+</main>
+<footer>Generated by ai-daily-digest · {{ generated_at }}</footer>
+<script>
+  document.querySelectorAll('nav button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pane = btn.dataset.pane;
+      document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === pane));
+    });
+  });
+</script>
+</body>
+</html>

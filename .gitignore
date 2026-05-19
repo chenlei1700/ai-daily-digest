@@ -1,0 +1,21 @@
+# sensitive — contains live Reddit session JWT
+data/reddit_cookie.txt
+
+# dedup state (don't share across machines)
+data/seen.db
+data/seen.db-journal
+
+# generated outputs (regenerated daily)
+output/
+data/wiki/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+
+# editor
+.vscode/
+.idea/
+*.swp

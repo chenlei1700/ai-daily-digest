@@ -1,0 +1,8 @@
+Presence of this file disables the Reddit source in ai-daily-digest.
+
+To re-enable Reddit (after fixing IP ban / installing Firefox / re-copying cookie):
+   1. Delete this file: `rm data/reddit_disabled`
+   2. Next "AI 日报" trigger will resume calling Reddit.
+
+Disabled on: 2026-05-19
+Reason: temporary IP ban from Reddit anti-bot; cookie tier untested
