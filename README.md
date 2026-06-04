@@ -1,6 +1,6 @@
 # ai-daily-digest
 
-A Claude Code skill that collects daily AI-domain updates across 5 categories, deduplicates against prior days, ranks by importance, summarizes via Claude itself (no API call), and renders a tabbed HTML brief opened in your browser — **all from a single phrase like "AI 日报"**.
+A Claude Code skill that collects daily AI-domain updates across 6 categories, deduplicates against prior days, ranks by importance, summarizes via Claude itself (no API call), and renders a tabbed HTML brief opened in your browser — **all from a single phrase like "AI 日报"**.
 
 ![Sample HTML output](docs/screenshot.png)
 
@@ -14,34 +14,35 @@ A Claude Code skill that collects daily AI-domain updates across 5 categories, d
 
 When you say "AI 日报" / "今日 AI 简报" / "daily ai digest" in Claude Code, the skill:
 
-1. **Fetches** from 5 categorized sources in parallel
+1. **Fetches** from 6 categorized sources in parallel
 2. **Deduplicates** against `data/seen.db` so the same item never appears twice across days
 3. **Ranks** items by an importance heuristic (HN points ≈ GitHub stars on the same scale)
 4. **Claude itself writes summaries** — no OpenAI/Anthropic API key needed
-5. **Renders** a single-file HTML with 5 category tabs + a markdown wiki entry for long-term archive
+5. **Renders** a single-file HTML with 6 category tabs + a markdown wiki entry for long-term archive
 
-### 5 categories
+### 6 categories
 
 | Category | Sources |
 |---|---|
 | 重要论文 (papers) | arXiv (cs.AI, cs.CL, cs.LG) |
 | AI 新闻 (news) | Hacker News + r/MachineLearning + r/singularity |
 | GitHub 热门 (trending) | GitHub Trending page filtered for AI relevance, sorted by **weekly new stars** (not cumulative) |
-| 大模型动态 (LLM updates) | HN + Hugging Face + r/LocalLLaMA |
+| 大模型动态 (LLM updates) | Simon Willison RSS + OpenAI / Google DeepMind official blogs + HN keyword search |
 | Claude Code | `anthropics/claude-code` releases + commits + r/ClaudeAI |
+| Codex | OpenAI Codex releases/commits and related updates |
 
 Reddit sources are optional — see "Reddit fallback chain" below.
 
 ## Sample output
 
-The HTML brief is a single-file, dependency-free page with 5 tabs:
+The HTML brief is a single-file, dependency-free page with 6 tabs:
 
 ```
 ┌─ AI Daily Digest ────────────────────────────────────────────┐
 │ 2026-05-19 · 共 66 条（已增量去重 0 条）                       │
 ├──────────────────────────────────────────────────────────────┤
 │ [重要论文 15] [AI 新闻 15] [GitHub 热门 8]                     │
-│ [大模型动态 13] [Claude Code 15]                              │
+│ [大模型动态 13] [Claude Code 15] [Codex 5]                    │
 ├──────────────────────────────────────────────────────────────┤
 │ ╭──────────────────────────────────────────────────╮ ★ 64.6 │
 │ │ DashAttention：可微的自适应稀疏分层注意力             │       │
@@ -84,7 +85,7 @@ data/
 ```
 
 The HTML has:
-- 5 category tabs, sorted by importance score
+- 6 category tabs, sorted by importance score
 - Chinese titles with English originals in parentheses
 - Three-section deep summaries (① 事实 / ② 研究者视角 / ③ 工程师视角) for top items
 - One-sentence brief summaries for the rest
@@ -201,7 +202,7 @@ If all fail, the HTML shows an orange banner prompting login. To skip Reddit ent
 These are the two design knobs that determine output quality:
 
 - **Scoring** (`src/ai_daily_digest/scoring.py::score_item`) — decides ordering within each category. Default calibration: HN 1000 pts ≈ GitHub 10k stars ≈ score 100. Tweak weights for big-lab keywords (Anthropic / DeepMind / etc), recency decay, etc.
-- **Summary prompt** (`SKILL.md`, Step 4) — embedded directly in the skill so Claude reads & applies it each run. Adjust tone, length, hype-detection rules.
+- **Summary prompt** (`SKILL.md`, Step 4) — embedded directly in the skill so Claude reads & applies it each run. Adjust tone, length, hype-detection rules. For large pending batches, the skill now requires concurrent subagents to keep launchd/Claude Code runs from hanging or taking 40+ minutes.
 
 ## Architecture
 
@@ -212,8 +213,9 @@ src/ai_daily_digest/
 │   ├── arxiv.py
 │   ├── ai_news.py     (Hacker News Algolia)
 │   ├── github_trending.py  (HTML scrape of /trending?since=weekly)
-│   ├── llm_updates.py
+│   ├── llm_updates.py  (Simon Willison + official AI lab blogs + HN keyword search)
 │   ├── claude_code.py
+│   ├── codex.py
 │   └── reddit.py      (4-tier fallback)
 ├── models.py          # Item dataclass + categories
 ├── dedupe.py          # SQLite seen-set
