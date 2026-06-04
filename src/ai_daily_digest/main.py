@@ -128,30 +128,11 @@ def run_collect(
 
     # 4. persist items + pending list
     date_str = on_date.isoformat()
-
-    # Accumulate across same-day runs: if today's items.json already exists
-    # (an earlier collect ran today), merge old items with new ones, keeping
-    # the highest score per URL. This way "AI 日报" twice in one day shows
-    # both batches in the HTML, not just the latest.
-    existing_path = _items_path(date_str)
-    accumulated: dict[str, Item] = {}
-    if existing_path.exists():
-        try:
-            prev = json.loads(existing_path.read_text(encoding="utf-8"))
-            for d in prev.get("items", []):
-                it = Item.from_dict(d)
-                accumulated[it.url] = it
-        except Exception as e:
-            log.warning("could not merge previous items.json (%s); starting fresh", e)
-    for it in fresh:
-        accumulated[it.url] = it  # new wins on collision
-    merged = list(accumulated.values())
-
     items_data = {
         "date": date_str,
         "deduped_count": deduped_count,
         "reddit_status": reddit_source.LAST_STATUS,
-        "items": [it.to_dict() for it in merged],
+        "items": [it.to_dict() for it in fresh],
     }
     _items_path(date_str).write_text(
         json.dumps(items_data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -186,8 +167,12 @@ def run_collect(
         json.dumps(pending_data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    # 5. record as seen — collect commits the dedup state.
-    store.record(fresh, on_date)
+    # 5. record as seen — only items that get a deep summary count as "shown".
+    # Brief items aren't recorded, so they can re-surface and get another shot at
+    # top-K tomorrow. Prevents the failure mode where a slow-moving source (e.g.
+    # HF Daily Papers) gets fully consumed on day 1 and shows 0 items on day 2.
+    deep_items = [it for it in fresh if it.url in deep_set]
+    store.record(deep_items, on_date)
 
     log.info("items.json   : %s", _items_path(date_str))
     log.info("pending.json : %s (%d items: %d deep + %d brief)",

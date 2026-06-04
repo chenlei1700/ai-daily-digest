@@ -1,10 +1,11 @@
 """GitHub Trending — scrapes the public /trending HTML page.
 
 The Search API can't tell us *trending* (it only sorts by cumulative stars),
-so we parse the official trending page. We default to `since=weekly` because:
-  - daily is too noisy and often dominated by random non-AI repos
-  - monthly is too slow to surface new projects
-  - weekly is the sweet spot for a daily digest reader
+so we parse the official trending page. We pull from BOTH `since=daily` and
+`since=weekly` and merge by repo URL:
+  - daily surfaces newly hot repos (avoids the dedup wipeout when weekly-only
+    repeats the same projects for 5+ days)
+  - weekly keeps higher-quality projects that built sustained momentum
 
 We filter to AI-relevant rows after scraping (no official topic filter on
 the trending page — we approximate via keyword match against title +
@@ -34,14 +35,43 @@ HEADERS = {
 }
 
 
-def fetch(limit: int = 30, since: str = "weekly") -> list[Item]:
+def fetch(limit: int = 30, since: str | None = None) -> list[Item]:
+    """Fetch trending repos.
+
+    If `since` is None (default), pulls daily + weekly and merges by URL,
+    preferring the daily entry when both windows surface the same repo.
+    Pass an explicit `since` ("daily" / "weekly" / "monthly") to fetch one window.
+    """
+    if since is not None:
+        return _fetch_one(since, limit)
+
+    daily = _fetch_one("daily", limit)
+    weekly = _fetch_one("weekly", limit)
+
+    by_url: dict[str, Item] = {}
+    for it in daily:
+        by_url[it.url] = it
+    for it in weekly:
+        by_url.setdefault(it.url, it)
+
+    merged = list(by_url.values())
+    merged.sort(
+        key=lambda it: (
+            0 if it.raw_metrics.get("trending_period") == "daily" else 1,
+            -(it.raw_metrics.get("new_stars") or 0),
+        )
+    )
+    return merged[:limit]
+
+
+def _fetch_one(since: str, limit: int) -> list[Item]:
     items: list[Item] = []
     try:
         with httpx.Client(timeout=20.0, headers=HEADERS, follow_redirects=True) as client:
             r = client.get(TRENDING_URL, params={"since": since})
             r.raise_for_status()
     except Exception as e:
-        log.warning("github trending fetch failed: %s", e)
+        log.warning("github trending fetch failed (since=%s): %s", since, e)
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")

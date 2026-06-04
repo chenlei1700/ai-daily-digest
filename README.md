@@ -92,16 +92,65 @@ The HTML has:
 
 ## Install
 
+### Prerequisites
+
+1. **Claude Code CLI** — [Install from anthropics/claude-code](https://github.com/anthropics/claude-code)
+2. **Python 3.11+** and **[uv](https://docs.astral.sh/uv/)**
+3. **GitHub CLI (recommended)** — Without it, `claude_code` source will return 0 items due to GitHub API rate limits (60/h unauthenticated):
+   ```bash
+   brew install gh
+   gh auth login
+   ```
+4. **ANTHROPIC_AUTH_TOKEN** — Add to your shell rc file (`~/.zshrc` or `~/.bashrc`):
+   ```bash
+   export ANTHROPIC_AUTH_TOKEN="sk-ant-..."
+   export ANTHROPIC_BASE_URL="https://api.anthropic.com"  # or your relay URL
+   ```
+
+### Quick Install (macOS/Linux)
+
 ```bash
 # Clone
 git clone <your-fork-url> ai-daily-digest
 cd ai-daily-digest
 
-# Install dependencies via uv
+# Install Python dependencies
 uv sync
+
+# Run interactive installer (sets up launchd for daily 09:07 runs)
+./install.sh
 ```
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+The installer will:
+- Check all dependencies and guide you through missing ones
+- Copy launcher script to `~/.local/bin/`
+- Generate launchd plist with correct paths
+- Create `.claude/settings.json` for auto-permissions
+- Load the job (next run: tomorrow 09:07)
+
+### Manual Install
+
+If you prefer manual setup or are on Windows:
+
+```bash
+# 1. Symlink to Claude Code skills directory
+ln -s "$(pwd)" ~/.claude/skills/ai-daily-digest
+
+# 2. Create project-level permissions (avoids launchd hanging on Agent tool)
+mkdir -p .claude
+cat > .claude/settings.json << 'EOF'
+{
+  "permissions": {
+    "allowed": [
+      {"type": "prompt", "tool": "Agent", "prompt": "*"}
+    ]
+  }
+}
+EOF
+
+# 3. For launchd automation, manually edit and load the plist template
+#    (see install.sh for reference)
+```
 
 ## Use
 

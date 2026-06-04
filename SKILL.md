@@ -1,6 +1,6 @@
 ---
 name: ai-daily-digest
-description: Collect daily AI-domain updates across 5 categories (papers, AI news, GitHub trending, LLM updates, Claude Code releases), deduplicate against prior days, rank by importance, write three-section summaries yourself (no API call), render a tabbed HTML brief, and open it in the browser. Use when the user says "AI 日报"、"今日 AI 简报"、"今天 AI 圈"、"daily ai digest"、"ai daily news"、"跑一下日报"、"看下今日 AI"、or similar.
+description: Collect daily AI-domain updates across 6 categories (papers, AI news, GitHub trending, LLM updates, Claude Code releases, OpenAI Codex releases), deduplicate against prior days, rank by importance, write three-section summaries yourself (no API call), render a tabbed HTML brief, and open it in the browser. Use when the user says "AI 日报"、"今日 AI 简报"、"今天 AI 圈"、"daily ai digest"、"ai daily news"、"跑一下日报"、"看下今日 AI"、or similar.
 ---
 
 # AI Daily Digest — skill-mode runner
@@ -10,10 +10,12 @@ description: Collect daily AI-domain updates across 5 categories (papers, AI new
 This skill is split into **two Python stages** with **you (Claude) in the middle**:
 
 ```
-[ Python: collect ]  →  pending.json  →  [ you: summarize ]  →  summaries.json  →  [ Python: apply ]  →  HTML
+[ Python: collect ]  →  pending.json  →  [ you: summarize (并发) ]  →  summaries.json  →  [ Python: apply ]  →  HTML
 ```
 
 You don't need an API key. The Python side does no LLM call — **you write the summaries yourself** by reading `pending.json` and saving `summaries.json`.
+
+**性能要点**：当 `pending.items ≥ 20` 时**必须**用 `Agent` 工具并发处理（按 category 分组 spawn 多个 subagent 同时写），否则 100+ 条摘要的串行生成会耗时 40+ 分钟。详见 Step 4e。
 
 ## Auto-execution flow
 
@@ -21,13 +23,27 @@ When the user invokes this skill, execute steps 1-6 in order. Stop and report if
 
 ### Step 1 — Locate the skill root
 
-Skill root: `D:\work\claude_learn\skills\ai-daily-digest\`. If the path doesn't exist, `cd` to the directory containing this `SKILL.md`.
+Skill root: the directory containing this `SKILL.md`. `cd` into it before running any commands.
 
 ### Step 2 — Check whether today's digest already exists
 
 If `output/digest-<today>.html` exists and was modified within the last 30 minutes, **skip to Step 6** (just re-open it). Tell the user: *"已使用 N 分钟前的简报。"*
 
-### Step 3 — Run the `collect` stage
+### Step 3 — Check GitHub CLI (first-run only)
+
+If `gh` is not installed or not logged in, the `claude_code` source will fail (GitHub API limits unauthenticated requests to 60/h). Check once per session:
+
+```bash
+if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+    echo "⚠️  GitHub CLI not found or not logged in."
+    echo "Claude Code source will return 0 items without it."
+    echo "Install: brew install gh && gh auth login"
+fi
+```
+
+If the check fails, **tell the user** (don't silently proceed). Most users can fix this in 2 minutes.
+
+### Step 4 — Run the `collect` stage
 
 ```powershell
 uv run python -m ai_daily_digest.main collect --quiet
@@ -44,6 +60,8 @@ Parse this line. If `pending=0`, all items were already in the dedup store — s
 ### Step 4 — Read `pending.json` and write `summaries.json` yourself
 
 This is **your job, not Python's**. For **every item** in `pending.json::items[]`, produce a Chinese title translation **and** a Chinese summary (length depends on `summary_mode`).
+
+**⚡ 性能要求（重要）**：当 `pending.items` ≥ 20 条时，**必须并发处理**。串行写 100+ 条摘要会让整个流程从 ~5 分钟延长到 40+ 分钟。具体做法见 **4e**。
 
 **4a.** Read `output/digest-YYYY-MM-DD.pending.json`. Each item has:
 
@@ -111,6 +129,36 @@ This is **your job, not Python's**. For **every item** in `pending.json::items[]
 
 **IMPORTANT — don't dump summaries to chat.** Write the file silently. The user sees them in HTML, not in chat. Echoing 70 summaries floods the conversation.
 
+**⚠️ 大文件分段写入（必须遵守，避免 launchd 卡死）**：单次响应输出上限为 8192 tokens，~80 条摘要的 JSON 通常 > 50KB，**直接 Write 会触发"文件过大"提示并卡住后台执行**。正确做法：
+
+1. **先建空骨架**：用 Write 写入 `{}` 或 `{"<first_url>": {...}}` 创建文件
+2. **再用 Edit 追加**：每次 Edit 追加 ~10-15 条（每条约 500 字节），通过精确匹配 `"summary": "..."\n  }\n}` 形式的尾部锚点插入新条目
+3. **绝不询问用户**：在任何环境下（交互/后台/launchd）遇到"是否分段写入"的提示时，**直接选择分段写入并继续执行**，不要等待确认
+4. **简化策略**：如果觉得 Edit 追加复杂，可以直接把摘要分成多批，每批一个 Write 写到 `summaries.part1.json`、`summaries.part2.json`，最后用 `python -c "import json; ..."` 一行命令合并成 `summaries.json`
+
+**4e. 并发执行规范（pending.items ≥ 20 时必须采用）**
+
+串行生成 102 条摘要的实测耗时约 42 分钟（2026-06-03 实例），并发后可压到 6-8 分钟。流程：
+
+1. **按 category 分组**：把 `pending.items` 按 `category` 字段分桶。常见分桶：`arxiv`、`ai_news`、`github_trending`、`llm_updates`、`claude_code`、`codex`。
+2. **大桶再切片**：单个 category 超过 20 条时，按 `score` 降序均分成 ~15 条/片的子任务，避免单个 subagent 输出过长被截断。
+3. **并发 spawn subagents**：在**同一条消息**里并行调用 `Agent` 工具（`subagent_type=general-purpose`），每个 subagent 一个分组/分片。每个 subagent 的 prompt **必须自包含**（subagent 看不到本对话上下文），需要包含：
+   - 该分组所有条目的完整 JSON（url / title / source / summary_mode / raw）
+   - 完整的 title_zh 与 summary 规则（参见 4b、4c 整段，原文复制到 prompt 里）
+   - 输出要求：**只返回 `{url: {title_zh, summary}}` 形式的 JSON，不要任何解释文字**
+4. **主线程合并（分段写入，避免 launchd 卡死）**：等所有 subagent 返回后，**不要一次性 Write 大 JSON**（会触发"文件过大"询问导致后台卡死）。改用以下任一方式：
+   - **方式 A（推荐）**：让每个 subagent 直接 `Write` 到独立的 `output/digest-DATE.summaries.part-<category>.json`，主线程**只**用一条 Bash 命令合并：
+     ```bash
+     python3 -c "import json,glob; d={}; [d.update(json.load(open(p))) for p in glob.glob('output/digest-DATE.summaries.part-*.json')]; json.dump(d, open('output/digest-DATE.summaries.json','w'), ensure_ascii=False, indent=2)"
+     ```
+   - **方式 B**：主线程先 Write 空 `{}`，再按分组用 Edit 逐个追加（参见 4d）。
+5. **覆盖率校验**：合并后 keys 数应等于 `pending.items` 长度。少了的 url 单独补一次（在主线程直接写一条，或起一个 mini subagent）。
+6. **失败重试**：如果某个 subagent 报错或返回的不是合法 JSON，对该分组重试一次；仍失败则在主线程串行处理这一组（保证总数完整）。
+
+**何时不用并发**：`pending.items < 20` 时直接在主线程串行写更划算（subagent 启动 + 跨进程 IO 反而更慢）。
+
+**禁止**：不要把整个 102 条塞进一个 subagent —— 单 agent 输出仍是串行 token 流，不会更快。并发的核心是**多个 subagent 同时跑**。
+
 ### Step 5 — Run the `apply` stage
 
 ```powershell
@@ -127,16 +175,24 @@ Parse to get the HTML path.
 
 ### Step 6 — Open the HTML
 
+**macOS/Linux:**
+```bash
+open "<the html path>"
+```
+
+**Windows:**
 ```powershell
 Invoke-Item "<the html path>"
 ```
+
+Use the command appropriate for the current platform.
 
 ### Step 7 — Report back
 
 Short Chinese summary (2-3 lines):
 
 > 今日 AI 简报已生成：**N 条新内容**（去重 D 条），已为 **P 条 top items** 写入摘要。
-> - 重要论文 X · AI 新闻 X · GitHub 热门 X · 大模型动态 X · Claude Code X
+> - 重要论文 X · AI 新闻 X · GitHub 热门 X · 大模型动态 X · Claude Code X · Codex X
 > - 已在浏览器中打开 `digest-YYYY-MM-DD.html`；Wiki 归档：`data\wiki\YYYY-MM-DD.md`
 
 Per-category counts come from `data/wiki/YYYY-MM-DD.md`'s `## Contents` section. **Do not invent numbers.**
@@ -161,7 +217,7 @@ Per-category counts come from `data/wiki/YYYY-MM-DD.md`'s `## Contents` section.
 src/ai_daily_digest/
 ├── main.py            # `collect` and `apply` subcommands
 ├── sources/           # category fetchers + reddit (multi-category)
-│   ├── arxiv.py, ai_news.py, github_trending.py, llm_updates.py, claude_code.py
+│   ├── arxiv.py, ai_news.py, github_trending.py, llm_updates.py, claude_code.py, codex.py
 │   └── reddit.py      # routes 5 subreddits → 3 categories (see file)
 ├── models.py          # Item, CATEGORIES, CATEGORY_LABELS
 ├── dedupe.py          # SQLite seen-set
@@ -180,8 +236,8 @@ data/seen.db                     # incremental dedup state
 
 ## Manual invocation (debugging only)
 
-```powershell
-cd D:\work\claude_learn\skills\ai-daily-digest
+```bash
+cd ~/.claude/skills/ai-daily-digest
 
 # Stage 1 alone:
 uv run python -m ai_daily_digest.main collect --quiet

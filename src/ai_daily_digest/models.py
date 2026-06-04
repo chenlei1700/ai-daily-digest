@@ -38,10 +38,7 @@ class Item:
         return cls(**d)
 
 
-CATEGORIES = [
-    "arxiv", "ai_news", "github_trending", "llm_updates", "claude_code",
-    "intl_politics", "china_news",
-]
+CATEGORIES = ["arxiv", "ai_news", "github_trending", "llm_updates", "claude_code", "codex"]
 
 CATEGORY_LABELS = {
     "arxiv": "重要论文",
@@ -49,6 +46,5 @@ CATEGORY_LABELS = {
     "github_trending": "GitHub 热门",
     "llm_updates": "大模型动态",
     "claude_code": "Claude Code",
-    "intl_politics": "国际政治",
-    "china_news": "中国动态",
+    "codex": "Codex",
 }

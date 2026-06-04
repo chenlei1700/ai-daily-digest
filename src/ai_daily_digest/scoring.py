@@ -81,27 +81,21 @@ def score_item(item: Item) -> float:
             base += math.log1p(m.get("forks", 0)) * 1.5
 
     elif item.category == "arxiv":
-        base = 30.0                         # baseline for any paper that surfaced
-        text = f"{item.title} {item.summary or ''}".lower()
-        if any(lab in text for lab in _BIG_LABS):
-            base += 15
-        if any(kw in text for kw in _RESULT_TERMS):
-            base += 8
+        upvotes = m.get("upvotes", 0)
+        if upvotes > 0:
+            # HF-sourced: log1p(400)*14 ≈ 84, log1p(80)*14 ≈ 61, log1p(10)*14 ≈ 34
+            base = math.log1p(upvotes) * 14
+            base += min(m.get("num_comments", 0), 50) * 0.3
+        else:
+            # Fallback path (arXiv API directly): no upvotes signal available.
+            base = 30.0
+            text = f"{item.title} {item.summary or ''}".lower()
+            if any(lab in text for lab in _BIG_LABS):
+                base += 15
+            if any(kw in text for kw in _RESULT_TERMS):
+                base += 8
 
-    elif item.category in ("intl_politics", "china_news"):
-        # RSS-based news has no engagement metrics — base on category +
-        # source authority + headline keywords.
-        base = 40.0
-        text = (item.title or "").lower()
-        # Boost for authoritative sources or major event keywords.
-        if any(kw in text for kw in (
-            "ai", "anthropic", "openai", "nvidia", "tsmc", "huawei",
-            "war", "election", "summit", "trade", "tariff", "sanction",
-            "中央", "政治局", "国务院", "习近平", "李强", "财政部", "央行",
-        )):
-            base += 15
-
-    elif item.category == "claude_code":
+    elif item.category in ("claude_code", "codex"):
         if "tag" in m:                      # official release → high signal
             base = 100.0
             if m.get("is_prerelease"):
