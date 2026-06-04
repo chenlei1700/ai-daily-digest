@@ -1,11 +1,12 @@
 """International politics — RSS aggregation from authoritative wire services.
 
 Sources:
-  - BBC World News + BBC Politics
-  - Al Jazeera English (full RSS)
+  - Al Jazeera English (Middle East / global)
+  - DW English (German perspective, depth)
+  - The Guardian World + Politics (UK perspective)
 
-User originally requested Reuters but Reuters retired its public RSS endpoint;
-BBC fills the same neutral-wire role and stays accessible from mainland China.
+User originally requested Reuters but Reuters retired its public RSS endpoint.
+BBC was previously used here but removed at user request.
 """
 from __future__ import annotations
 
@@ -20,9 +21,10 @@ from ..models import Item
 log = logging.getLogger(__name__)
 
 FEEDS = [
-    ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml"),
-    ("BBC Politics", "http://feeds.bbci.co.uk/news/politics/rss.xml"),
     ("Al Jazeera English", "https://www.aljazeera.com/xml/rss/all.xml"),
+    ("DW English", "https://rss.dw.com/atom/rss-en-all"),
+    ("The Guardian World", "https://www.theguardian.com/world/rss"),
+    ("The Guardian Politics", "https://www.theguardian.com/politics/rss"),
 ]
 
 HEADERS = {
