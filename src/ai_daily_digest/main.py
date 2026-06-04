@@ -128,11 +128,30 @@ def run_collect(
 
     # 4. persist items + pending list
     date_str = on_date.isoformat()
+
+    # Accumulate across same-day runs: if today's items.json already exists
+    # (an earlier collect ran today), merge old items with new ones, keeping
+    # the highest score per URL. This way "AI 日报" twice in one day shows
+    # both batches in the HTML, not just the latest.
+    existing_path = _items_path(date_str)
+    accumulated: dict[str, Item] = {}
+    if existing_path.exists():
+        try:
+            prev = json.loads(existing_path.read_text(encoding="utf-8"))
+            for d in prev.get("items", []):
+                it = Item.from_dict(d)
+                accumulated[it.url] = it
+        except Exception as e:
+            log.warning("could not merge previous items.json (%s); starting fresh", e)
+    for it in fresh:
+        accumulated[it.url] = it  # new wins on collision
+    merged = list(accumulated.values())
+
     items_data = {
         "date": date_str,
         "deduped_count": deduped_count,
         "reddit_status": reddit_source.LAST_STATUS,
-        "items": [it.to_dict() for it in fresh],
+        "items": [it.to_dict() for it in merged],
     }
     _items_path(date_str).write_text(
         json.dumps(items_data, ensure_ascii=False, indent=2), encoding="utf-8"

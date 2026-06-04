@@ -88,6 +88,19 @@ def score_item(item: Item) -> float:
         if any(kw in text for kw in _RESULT_TERMS):
             base += 8
 
+    elif item.category in ("intl_politics", "china_news"):
+        # RSS-based news has no engagement metrics — base on category +
+        # source authority + headline keywords.
+        base = 40.0
+        text = (item.title or "").lower()
+        # Boost for authoritative sources or major event keywords.
+        if any(kw in text for kw in (
+            "ai", "anthropic", "openai", "nvidia", "tsmc", "huawei",
+            "war", "election", "summit", "trade", "tariff", "sanction",
+            "中央", "政治局", "国务院", "习近平", "李强", "财政部", "央行",
+        )):
+            base += 15
+
     elif item.category == "claude_code":
         if "tag" in m:                      # official release → high signal
             base = 100.0
