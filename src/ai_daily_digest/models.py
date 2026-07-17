@@ -38,9 +38,22 @@ class Item:
         return cls(**d)
 
 
-CATEGORIES = ["arxiv", "ai_news", "github_trending", "llm_updates", "claude_code", "codex"]
+CATEGORIES = [
+    "pm_practice",
+    "model_limits",
+    "ai_evals",
+    "arxiv",
+    "ai_news",
+    "github_trending",
+    "llm_updates",
+    "claude_code",
+    "codex",
+]
 
 CATEGORY_LABELS = {
+    "pm_practice": "AI 产品方法",
+    "model_limits": "大模型边界",
+    "ai_evals": "AI 评测",
     "arxiv": "重要论文",
     "ai_news": "AI 新闻",
     "github_trending": "GitHub 热门",

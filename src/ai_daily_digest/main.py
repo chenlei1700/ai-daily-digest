@@ -63,6 +63,10 @@ def _wiki_path(date_str: str) -> Path:
     return DATA_DIR / "wiki" / f"{date_str}.md"
 
 
+def _summary_part_paths(date_str: str) -> list[Path]:
+    return sorted(OUTPUT_DIR.glob(f"digest-{date_str}.summaries.part-*.json"))
+
+
 def _select_for_summary(items: list[Item], k_per_cat: int) -> list[Item]:
     """Top-K per category by score — the pool Claude will summarize."""
     by_cat: dict[str, list[Item]] = {}
@@ -117,7 +121,9 @@ def run_collect(
             log.exception("multi-category source %s crashed: %s", name, e)
 
     # 2. dedup
-    fresh = store.filter_new(raw_items)
+    learning_items = [it for it in raw_items if it.raw_metrics.get("learning_card")]
+    news_items = [it for it in raw_items if not it.raw_metrics.get("learning_card")]
+    fresh = learning_items + store.filter_new(news_items)
     deduped_count = len(raw_items) - len(fresh)
     log.info("after dedup: %d fresh items (%d filtered as already-seen)",
              len(fresh), deduped_count)
@@ -138,14 +144,14 @@ def run_collect(
         json.dumps(items_data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    # All fresh items go into pending.json. Top-K are marked "deep" (three-section
+    # All fresh items go into pending.json. Top-K are marked "deep" (four-section
     # summary); the rest are "brief" (single-sentence Chinese description).
     deep_set = {it.url for it in _select_for_summary(fresh, top_k_summary)}
     pending_data = {
         "date": date_str,
         "note": "Claude reads this, writes back to summaries.json — see SKILL.md.",
         "schema": {
-            "summary_mode": "'deep' → write 3-section summary; 'brief' → 1-sentence Chinese.",
+            "summary_mode": "'deep' → write 4-section summary; 'brief' → 1-sentence Chinese.",
             "output_format": "{<url>: {title_zh: str, summary: str}}",
         },
         "items": [
@@ -171,7 +177,10 @@ def run_collect(
     # Brief items aren't recorded, so they can re-surface and get another shot at
     # top-K tomorrow. Prevents the failure mode where a slow-moving source (e.g.
     # HF Daily Papers) gets fully consumed on day 1 and shows 0 items on day 2.
-    deep_items = [it for it in fresh if it.url in deep_set]
+    deep_items = [
+        it for it in fresh
+        if it.url in deep_set and not it.raw_metrics.get("learning_card")
+    ]
     store.record(deep_items, on_date)
 
     log.info("items.json   : %s", _items_path(date_str))
@@ -211,9 +220,9 @@ def run_apply(on_date: date_cls, quiet: bool) -> int:
     #   {url: "summary text"}                              ← legacy
     #   {url: {"title_zh": "...", "summary": "..."}}       ← current
     summaries_file = _summaries_path(date_str)
+    summaries, fallback_count = _load_or_recover_summaries(date_str, items, summaries_file)
     applied = 0
-    if summaries_file.exists():
-        summaries = json.loads(summaries_file.read_text(encoding="utf-8"))
+    if summaries:
         for it in items:
             entry = summaries.get(it.url) or summaries.get(it.dedup_key())
             if not entry:
@@ -237,11 +246,144 @@ def run_apply(on_date: date_cls, quiet: bool) -> int:
     log.info("HTML : %s", _html_path(date_str))
     log.info("Wiki : %s", _wiki_path(date_str))
 
+    # Surface fallback usage loudly. A high ratio means the summarize step
+    # (Claude writing summaries.json) failed or was skipped — the digest will
+    # render, but every card reads "信息有限，需读原文". Don't let this pass silently.
+    real = applied - fallback_count
+    if fallback_count:
+        ratio = fallback_count / applied if applied else 1.0
+        level = log.error if ratio >= 0.5 else log.warning
+        level(
+            "⚠️  %d/%d summaries are FALLBACK placeholders (%.0f%%). "
+            "The summarize step likely failed — check summaries.json.",
+            fallback_count, applied, ratio * 100,
+        )
+
     print(
         f"\nDIGEST_READY html={_html_path(date_str)} wiki={_wiki_path(date_str)} "
-        f"items={len(items)} deduped={deduped_count} summaries_applied={applied}"
+        f"items={len(items)} deduped={deduped_count} summaries_applied={applied} "
+        f"real={real} fallback={fallback_count}"
     )
     return 0
+
+
+def _load_or_recover_summaries(
+    date_str: str,
+    items: list[Item],
+    summaries_file: Path,
+) -> tuple[dict, int]:
+    """Load summaries, or recover from part files and fallback summaries.
+
+    Background launches can fail halfway through large JSON writes. Rather than
+    rendering an empty digest, keep every valid summary part and synthesize a
+    conservative learning-oriented fallback for missing items.
+
+    Returns (summaries, fallback_count) so the caller can report how much of the
+    digest is real vs placeholder text.
+    """
+    summaries: dict = {}
+    if summaries_file.exists():
+        try:
+            data = json.loads(summaries_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                summaries.update(data)
+        except Exception as e:
+            log.warning("summaries.json invalid; trying part files: %s", e)
+
+    for part in _summary_part_paths(date_str):
+        try:
+            data = json.loads(part.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for key, entry in data.items():
+                    # A complete summaries file is authoritative. Part files
+                    # only recover absent or previously synthesized entries.
+                    if key not in summaries or _is_fallback_summary(summaries[key]):
+                        summaries[key] = entry
+        except Exception as e:
+            log.warning("summary part invalid, skipped: %s (%s)", part.name, e)
+
+    missing = 0
+    for it in items:
+        if it.url in summaries or it.dedup_key() in summaries:
+            continue
+        summaries[it.url] = _fallback_summary(it)
+        missing += 1
+
+    if summaries:
+        summaries_file.write_text(
+            json.dumps(summaries, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if missing:
+            log.warning("filled %d missing summaries with fallback text", missing)
+
+    # Count fallback text across the *whole* set, not just the ones we just
+    # synthesized. This catches the failure mode where a prior step wrote a
+    # complete-but-placeholder summaries.json (every card = "信息有限，需读原文"),
+    # which the `missing` counter alone would report as 0.
+    fallback_count = 0
+    for it in items:
+        entry = summaries.get(it.url) or summaries.get(it.dedup_key())
+        if _is_fallback_summary(entry):
+            fallback_count += 1
+
+    return summaries, fallback_count
+
+
+# Sentinel phrase every fallback summary contains; used to detect a
+# summaries.json that is structurally complete but semantically empty.
+_FALLBACK_MARKER = "信息有限，需读原文"
+
+
+def _is_fallback_summary(entry) -> bool:
+    if isinstance(entry, str):
+        text = entry
+    elif isinstance(entry, dict):
+        text = entry.get("summary") or ""
+    else:
+        return False
+    return _FALLBACK_MARKER in text
+
+
+def _fallback_summary(it: Item) -> dict[str, str]:
+    label = CATEGORY_LABELS.get(it.category, it.category)
+    title_zh = it.title
+    raw = (it.summary or "").strip()
+    basis = raw[:160] if raw else f"原始信息主要来自标题：{it.title}"
+
+    if it.category == "pm_practice":
+        concept = "这条内容适合用来练习把用户任务、输入输出、流程节点、人工确认和成功指标写进 PRD。"
+        pm_use = "阅读时重点标出用户要完成的任务、AI 参与的环节、失败时的兜底入口，以及可以验证价值的指标。"
+    elif it.category == "model_limits":
+        concept = "这条内容适合用来理解大模型边界：模型可能会出错、越权、误解上下文，或者在长上下文中丢失关键信息。"
+        pm_use = "阅读时重点追问哪些场景不能全自动、哪些输出需要引用或人工确认，以及失败后用户如何纠错。"
+    elif it.category == "ai_evals":
+        concept = "这条内容适合用来学习 AI 评测：先定义任务成功，再设计样本、指标、人工复核和上线门槛。"
+        pm_use = "阅读时重点把它转成一个小评测集：输入是什么、好答案标准是什么、错误答案如何判定。"
+    elif it.category == "arxiv":
+        concept = "这条内容来自研究进展，产品经理不必先看公式，应该先判断它可能带来什么新能力或新限制。"
+        pm_use = "阅读时重点追问它能改善哪个用户任务、落地还缺什么条件、是否需要评测集验证。"
+    elif it.category in ("github_trending", "claude_code", "codex"):
+        concept = "这条内容来自工具或平台变化，适合观察 AI 如何改变具体工作流。"
+        pm_use = "阅读时重点判断它减少了哪一步人工操作、引入了什么权限或可靠性风险、是否值得纳入竞品分析。"
+    else:
+        concept = "这条内容适合用于建立行业判断：哪些能力在变强，哪些成本、监管、竞品或用户心智正在变化。"
+        pm_use = "阅读时重点记录它对产品机会、风险、定价、渠道或用户需求优先级的影响。"
+
+    if it.raw_metrics.get("learning_card"):
+        happened = basis
+    else:
+        happened = f"信息有限，需读原文。这是一条「{label}」相关内容：{it.title}"
+
+    return {
+        "title_zh": title_zh,
+        "summary": (
+            f"① **发生了什么**：{happened}\n"
+            f"② **你要学的概念**：{concept}\n"
+            f"③ **产品经理怎么用**：{pm_use}\n"
+            f"④ **可以追问的问题**：这件事对应的真实用户任务是什么？上线前要用什么指标证明它真的有用？"
+        ),
+    }
 
 
 # ────────────────────────────────── CLI ──────────────────────────────────────

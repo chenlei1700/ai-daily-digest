@@ -8,6 +8,10 @@ LAUNCHER_NAME="ai-daily-digest-launcher.sh"
 LAUNCHER_PATH="$HOME/.local/bin/$LAUNCHER_NAME"
 PLIST_NAME="com.user.ai-daily-digest.plist"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME"
+CLEANUP_PLIST_NAME="com.user.ai-daily-digest-cleanup.plist"
+CLEANUP_PLIST_PATH="$HOME/Library/LaunchAgents/$CLEANUP_PLIST_NAME"
+SKILLS_DIR="$HOME/.claude/skills"
+SKILL_LINK="$SKILLS_DIR/ai-daily-digest"
 
 echo "=== AI Daily Digest Installer ==="
 echo ""
@@ -72,9 +76,27 @@ echo "Installing launcher script..."
 mkdir -p "$HOME/.local/bin"
 cp "$SKILL_DIR/ai-daily-digest-launcher.sh" "$LAUNCHER_PATH"
 chmod +x "$LAUNCHER_PATH"
+chmod +x "$SKILL_DIR/scripts/cleanup_expired.sh"
 echo "  ✓ $LAUNCHER_PATH"
 
-# 3. Generate launchd plist
+# 3. Link into Claude Code skills directory
+echo "Linking skill directory..."
+mkdir -p "$SKILLS_DIR"
+if [ -L "$SKILL_LINK" ] || [ -e "$SKILL_LINK" ]; then
+    current_target="$(readlink "$SKILL_LINK" 2>/dev/null || true)"
+    if [ "$current_target" != "$SKILL_DIR" ]; then
+        echo "  ⚠️  $SKILL_LINK already exists; leaving it unchanged."
+        echo "     Point it to this directory manually if Claude Code cannot find the skill:"
+        echo "     $SKILL_DIR"
+    else
+        echo "  ✓ $SKILL_LINK"
+    fi
+else
+    ln -s "$SKILL_DIR" "$SKILL_LINK"
+    echo "  ✓ $SKILL_LINK -> $SKILL_DIR"
+fi
+
+# 4. Generate launchd plist
 echo "Generating launchd plist..."
 mkdir -p "$HOME/Library/LaunchAgents"
 mkdir -p "$HOME/Library/Logs/ai-daily-digest"
@@ -104,6 +126,8 @@ cat > "$PLIST_PATH" << EOF
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>$HOME</string>
+        <key>AI_DAILY_DIGEST_DIR</key>
+        <string>$SKILL_DIR</string>
     </dict>
 
     <key>StartCalendarInterval</key>
@@ -128,7 +152,43 @@ EOF
 
 echo "  ✓ $PLIST_PATH"
 
-# 4. Create .claude/settings.json for Agent auto-permission
+# 5. Generate cleanup launchd plist
+echo "Generating cleanup plist..."
+cat > "$CLEANUP_PLIST_PATH" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.ai-daily-digest-cleanup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>$SKILL_DIR/scripts/cleanup_expired.sh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>21</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>$HOME/Library/Logs/ai-daily-digest/cleanup-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>$HOME/Library/Logs/ai-daily-digest/cleanup-stderr.log</string>
+</dict>
+</plist>
+EOF
+echo "  ✓ $CLEANUP_PLIST_PATH"
+
+# 6. Create .claude/settings.json for Agent auto-permission
 echo "Creating project-level permissions..."
 mkdir -p "$SKILL_DIR/.claude"
 cat > "$SKILL_DIR/.claude/settings.json" << 'EOF'
@@ -146,12 +206,28 @@ cat > "$SKILL_DIR/.claude/settings.json" << 'EOF'
 EOF
 echo "  ✓ $SKILL_DIR/.claude/settings.json"
 
-# 5. Load launchd job
+# 7. Load launchd jobs
 echo ""
-echo "Loading launchd job..."
+echo "Loading launchd jobs..."
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
+launchctl unload "$CLEANUP_PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
-echo "  ✓ Loaded (next run: tomorrow 09:07)"
+if launchctl load "$CLEANUP_PLIST_PATH" 2>/dev/null; then
+    echo "  ✓ Loaded cleanup launchd job (21:00)"
+else
+    echo "  ⚠️  Cleanup launchd job did not load; trying crontab fallback..."
+    cron_line="0 21 * * * $SKILL_DIR/scripts/cleanup_expired.sh"
+    if command -v crontab >/dev/null 2>&1 && (
+        crontab -l 2>/dev/null | grep -v 'ai-daily-digest/scripts/cleanup_expired.sh'
+        echo "$cron_line"
+    ) | crontab - 2>/dev/null; then
+        echo "  ✓ Installed cleanup crontab fallback (21:00)"
+    else
+        echo "  ⚠️  Could not install a 21:00 cleanup scheduler."
+        echo "     The digest launcher still runs cleanup before each 09:07 digest."
+    fi
+fi
+echo "  ✓ Loaded digest job (09:07)"
 
 echo ""
 echo "=== Installation Complete ==="
@@ -165,4 +241,7 @@ echo "  tail -f ~/Library/Logs/ai-daily-digest/stdout.log"
 echo ""
 echo "Uninstall:"
 echo "  launchctl unload $PLIST_PATH"
-echo "  rm $PLIST_PATH $LAUNCHER_PATH"
+echo "  launchctl unload $CLEANUP_PLIST_PATH"
+echo "  crontab -l | grep -v 'ai-daily-digest/scripts/cleanup_expired.sh' | crontab -"
+echo "  rm $PLIST_PATH $CLEANUP_PLIST_PATH $LAUNCHER_PATH"
+echo "  rm $SKILL_LINK"

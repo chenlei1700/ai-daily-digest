@@ -64,7 +64,16 @@ def score_item(item: Item) -> float:
     m = item.raw_metrics
     base = 0.0
 
-    if "points" in m:                       # HN-backed sources (ai_news, llm_updates)
+    if item.category in ("pm_practice", "model_limits", "ai_evals"):
+        if m.get("learning_card"):
+            base = 95.0 - m.get("curriculum_rank", 1)
+        elif "points" in m:
+            base = math.log1p(m["points"]) * _HN_COEF
+            base += min(m.get("num_comments", 0), 200) * 0.05
+        else:
+            base = 40.0
+
+    elif "points" in m:                     # HN-backed sources (ai_news, llm_updates)
         base = math.log1p(m["points"]) * _HN_COEF
         base += min(m.get("num_comments", 0), 200) * 0.05  # cap discussion bonus
 

@@ -133,7 +133,9 @@
         {% if it.published_at %} · {{ it.published_at[:10] }}{% endif %}
         {% if it.raw_metrics.points %} · {{ it.raw_metrics.points }} pts{% endif %}
         {% if it.raw_metrics.stars %} · ★{{ it.raw_metrics.stars }}{% endif %}
+        {% if it.raw_metrics.new_stars %} · +{{ it.raw_metrics.new_stars }} stars{% if it.raw_metrics.trending_period == "daily" %} today{% elif it.raw_metrics.trending_period == "weekly" %} this week{% endif %}{% endif %}
         {% if it.raw_metrics.language %} · {{ it.raw_metrics.language }}{% endif %}
+        {% if it.last_updated %} · 最近更新 {{ it.last_updated }}{% endif %}
       </div>
       {% if it.llm_summary %}
       <div class="summary">{{ it.llm_summary }}{% if it.hype_note %}
