@@ -66,6 +66,13 @@ def _view(it: Item) -> dict:
         "hype_note": hype,
         "score": it.score,
         "last_updated": _format_datetime(pushed_at or it.raw_metrics.get("updated_at")),
+        "source_tier": it.raw_metrics.get("source_tier"),
+        "source_version": it.source_version,
+        "retrieved_at": _format_datetime(
+            it.retrieved_at.isoformat() if it.retrieved_at else None
+        ),
+        "content_url": it.provenance.get("content_url"),
+        "content_verified": it.provenance.get("status") == "verified",
     }
 
 

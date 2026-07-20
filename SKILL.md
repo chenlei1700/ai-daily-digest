@@ -1,6 +1,6 @@
 ---
 name: ai-daily-digest
-description: Collect daily AI-domain updates and AI product-manager learning materials across 9 categories (AI product practice, model limits, AI evals, papers, news, GitHub trending, LLM updates, Claude Code, Codex), deduplicate against prior days, rank by learning value, write product-manager-oriented summaries yourself (no API call), render a tabbed HTML brief, and open it in the browser. Use when the user says "AI 日报"、"AI 产品经理日报"、"今日 AI 简报"、"今天 AI 圈"、"daily ai digest"、"ai daily news"、"跑一下日报"、"看下今日 AI"、or similar.
+description: Collect auto-updating AI-domain and AI product-manager learning materials across 9 categories, verify every public link, extract and version the actual webpage text, deduplicate and rank it, write evidence-bound Chinese summaries yourself (no API call), render a traceable HTML brief, and open it in the browser. Use when the user says "AI 日报"、"AI 产品经理日报"、"今日 AI 简报"、"今天 AI 圈"、"daily ai digest"、"ai daily news"、"跑一下日报"、"看下今日 AI"、or similar.
 ---
 
 # AI Daily Digest — skill-mode runner
@@ -10,7 +10,7 @@ description: Collect daily AI-domain updates and AI product-manager learning mat
 This skill is split into **two Python stages** with **you (Claude) in the middle**:
 
 ```
-[ Python: collect ]  →  pending.json  →  [ you: summarize (并发) ]  →  summaries.json  →  [ Python: apply ]  →  HTML
+[ Python: collect + verify links + read pages ] → pending.json → [ you: summarize verified text ] → summaries.json → [ Python: verify evidence + apply ] → HTML
 ```
 
 You don't need an API key. The Python side does no LLM call — **you write the summaries yourself** by reading `pending.json` and saving `summaries.json`.
@@ -52,7 +52,7 @@ uv run python -m ai_daily_digest.main collect --quiet
 The command prints a final marker line:
 
 ```
-COLLECT_READY items=N deduped=D pending=P items_json=... pending_json=... date=YYYY-MM-DD
+COLLECT_READY items=N deduped=D pending=P verified=V invalid=I items_json=... pending_json=... date=YYYY-MM-DD
 ```
 
 Parse this line. If `pending=0`, all items were already in the dedup store — skip to Step 5 with no summaries (apply will still render).
@@ -74,7 +74,19 @@ This is **your job, not Python's**. For **every item** in `pending.json::items[]
   "source": "arXiv",
   "score": 47.2,
   "summary_mode": "deep" | "brief",
-  "raw": "<original abstract / description, may be empty>"
+  "content": {
+    "text": "<text extracted from the verified public webpage>",
+    "content_url": "...",
+    "http_status": 200,
+    "content_sha256": "...",
+    "retrieved_at": "2026-07-20T09:00:00+00:00",
+    "source_version": "etag:..."
+  },
+  "source_metadata": {
+    "source_tier": "S" | "A" | "B" | null,
+    "publisher": "...",
+    "source_config_version": "..."
+  }
 }
 ```
 
@@ -90,7 +102,9 @@ This is **your job, not Python's**. For **every item** in `pending.json::items[]
 #### Common rules for `summary` (all items)
 
 - 必须使用中文。
-- 信息不足（如 `raw` 为空、只有标题）时，写 *"信息有限，需读原文。<可以从标题推断的一句话>"* — 不要编造细节。
+- **只能把 `content.text` 当作事实依据。** 标题、来源热度和你的背景知识只能帮助理解，不得补写网页中没有的事实。
+- `collect` 已读取并验证网页；不要只看标题或发现接口的短描述，也不要声称“需要再读原文”。
+- 如果正文确实没有支持某个细节，就省略该细节；不要推断数字、因果、发布日期或产品能力。
 - 不要"以下是摘要"之类的元注释。直接给内容。
 - **不要重复标题里已说过的内容**。
 
@@ -114,23 +128,27 @@ This is **your job, not Python's**. For **every item** in `pending.json::items[]
 - `github_trending` / `claude_code` / `codex`：重点讲工具或平台变化会改变什么工作流。
 - `ai_news` / `llm_updates`：重点讲行业变化对产品机会、风险、竞品判断的影响。
 
-如果原文（title 或 raw）含"革命性"、"突破性"、"颠覆"、"史无前例"、"震撼"、"碾压"等夸张词，**在末尾另起一行**用 `⚠️ [hype: <疑似营销措辞>]` 标注。原文没这类词就**不要输出 hype 行**。
+如果原文（title 或 `content.text`）含"革命性"、"突破性"、"颠覆"、"史无前例"、"震撼"、"碾压"等夸张词，**在末尾另起一行**用 `⚠️ [hype: <疑似营销措辞>]` 标注。原文没这类词就**不要输出 hype 行**。
 
 #### When `summary_mode == "brief"` (everything else)
 
-写 **1 句中文**（30-100 字），直接说明“这对 AI 产品经理学习有什么用”。**不要分段、不要圆圈编号**。如果信息有限，按上面 common rules 处理。
+写 **1 句中文**（30-100 字），直接说明“网页讲了什么，以及这对 AI 产品经理学习有什么用”。**不要分段、不要圆圈编号**。
 
-**4c.** Output schema — `{url: {title_zh, summary}}`:
+**4c.** Output schema — `{url: {title_zh, summary, content_sha256, source_version}}`。后两个字段必须从该条目的 `content` 原样复制；`apply` 会拒绝缺失、过期或不匹配的摘要：
 
 ```json
 {
   "https://www.nngroup.com/articles/ai-user-experience/": {
     "title_zh": "AI 产品指标：看任务完成而不是只看调用量",
-    "summary": "① 发生了什么：这篇内容提醒 AI 产品不能只用访问量或调用量判断成功。\n② 你要学的概念：AI 产品的核心指标应围绕任务完成、采纳率、纠错率和失败兜底，而不是模型看起来多聪明。\n③ 产品经理怎么用：写 PRD 时要把“用户是否采纳 AI 输出”“输出错了怎么改”“哪些场景必须人工确认”写成验收标准。\n④ 可以追问的问题：这个功能的成功样本和失败样本各是什么？上线前最低可接受的错误率是多少？"
+    "summary": "① 发生了什么：这篇内容提醒 AI 产品不能只用访问量或调用量判断成功。\n② 你要学的概念：AI 产品的核心指标应围绕任务完成、采纳率、纠错率和失败兜底，而不是模型看起来多聪明。\n③ 产品经理怎么用：写 PRD 时要把“用户是否采纳 AI 输出”“输出错了怎么改”“哪些场景必须人工确认”写成验收标准。\n④ 可以追问的问题：这个功能的成功样本和失败样本各是什么？上线前最低可接受的错误率是多少？",
+    "content_sha256": "<copy from content.content_sha256>",
+    "source_version": "<copy from content.source_version>"
   },
   "https://github.com/openclaw/openclaw": {
     "title_zh": "openclaw/openclaw：跨平台个人 AI 助手项目（一周冲上 ★373k）",
-    "summary": "本周 GitHub trending 冠军，定位 \"any OS, any platform\" 的个人 AI 助手；具体技术栈与质量需查 README 评估。"
+    "summary": "网页将其定位为跨平台个人 AI 助手；产品经理可据正文继续评估它减少了哪些操作，以及权限和可靠性风险。",
+    "content_sha256": "<copy from content.content_sha256>",
+    "source_version": "<copy from content.source_version>"
   }
 }
 ```
@@ -153,9 +171,9 @@ This is **your job, not Python's**. For **every item** in `pending.json::items[]
 1. **按 category 分组**：把 `pending.items` 按 `category` 字段分桶。常见分桶：`pm_practice`、`model_limits`、`ai_evals`、`arxiv`、`ai_news`、`github_trending`、`llm_updates`、`claude_code`、`codex`。
 2. **大桶再切片**：单个 category 超过 20 条时，按 `score` 降序均分成 ~15 条/片的子任务，避免单个 subagent 输出过长被截断。
 3. **并发 spawn subagents**：在**同一条消息**里并行调用 `Agent` 工具（`subagent_type=general-purpose`），每个 subagent 一个分组/分片。每个 subagent 的 prompt **必须自包含**（subagent 看不到本对话上下文），需要包含：
-   - 该分组所有条目的完整 JSON（url / title / source / summary_mode / raw）
+   - 该分组所有条目的完整 JSON（尤其是 url / title / source / summary_mode / content）
    - 完整的 title_zh 与 summary 规则（参见 4b、4c 整段，原文复制到 prompt 里）
-   - 输出要求：**只返回 `{url: {title_zh, summary}}` 形式的 JSON，不要任何解释文字**
+   - 输出要求：**只返回 `{url: {title_zh, summary, content_sha256, source_version}}` 形式的 JSON，不要任何解释文字**；证据字段从输入原样复制
 4. **主线程合并（分段写入，避免 launchd 卡死）**：等所有 subagent 返回后，**不要一次性 Write 大 JSON**（会触发"文件过大"询问导致后台卡死）。改用以下任一方式：
    - **方式 A（推荐）**：让每个 subagent 直接 `Write` 到独立的 `output/digest-DATE.summaries.part-<category>.json`，主线程**只**用一条 Bash 命令合并：
      ```bash
@@ -170,7 +188,7 @@ This is **your job, not Python's**. For **every item** in `pending.json::items[]
 subagent 常在 summary 正文里写**未转义的半角双引号**，拼接后 JSON 非法。这**几乎每次都会发生**，属于已知问题，**不是**放弃摘要的理由。
 
 - **正确做法**：让每个 subagent 各自 `Write` 到独立的 `part-<category>.json`（方式 A），由 Python 的 `json.load` 逐个解析——单个文件坏了只影响一组，且 subagent 自己写文件时引号已由工具正确转义。若仍有某个 part 解析失败，**只重跑那一组**，其余已生成的摘要必须保留。
-- **绝对禁止**：合并遇到任何编码/解析错误时，**不允许**跳过摘要直接跑 `apply`。那会让 `_fallback_summary` 把全部条目填成「信息有限，需读原文」占位符，等于当天日报全废（2026-07-16 就是这样，112 条全部退化）。
+- **绝对禁止**：合并遇到任何编码/解析错误时，**不允许**跳过摘要直接跑 `apply`。那会让 `_fallback_summary` 把全部条目填成「摘要生成失败」占位符，等于当天日报全废（2026-07-16 就是这样，112 条全部退化）。
 - **收尾自检**：`apply` 会打印 `real=N fallback=M`。**M 必须接近 0**。若 `fallback` 占比过高（apply 会用 ⚠️ ERROR 日志报出），说明摘要没接上，**必须回头修合并、重跑 apply**，不能就这么交付。
 
 **何时不用并发**：`pending.items < 20` 时直接在主线程串行写更划算（subagent 启动 + 跨进程 IO 反而更慢）。
@@ -189,7 +207,7 @@ This prints:
 DIGEST_READY html=... wiki=... items=N deduped=D summaries_applied=P
 ```
 
-Parse to get the HTML path.
+Parse to get the HTML path. If `fallback` is not close to 0, repair missing or evidence-mismatched summaries before continuing.
 
 ### Step 6 — Open the HTML
 
@@ -209,7 +227,7 @@ Use the command appropriate for the current platform.
 
 Short Chinese summary (2-3 lines):
 
-> 今日 AI 简报已生成：**N 条新内容**（去重 D 条），已为 **P 条 top items** 写入摘要。
+> 今日 AI 简报已生成：**N 条已验证内容**（去重 D 条，淘汰 I 个失效/不可读链接），已完成 **P 条**网页正文摘要。
 > - AI 产品方法 X · 大模型边界 X · AI 评测 X · 重要论文 X · AI 新闻 X · GitHub 热门 X · 大模型动态 X · Claude Code X · Codex X
 > - 已在浏览器中打开 `digest-YYYY-MM-DD.html`；Wiki 归档：`data\wiki\YYYY-MM-DD.md`
 
@@ -220,13 +238,16 @@ Per-category counts come from `data/wiki/YYYY-MM-DD.md`'s `## Contents` section.
 - **Don't echo summaries in chat.** Write directly to `summaries.json`. The HTML is the user-facing artifact.
 - **Don't ask the user before running.** The skill is "say-and-show".
 - **Don't skip Step 4.** Even if `pending.json` has 25 items, you must summarize all of them. The HTML will look skeletal if summaries are missing.
+- **Don't summarize discovery snippets or titles.** Use only each item's verified `content.text` and copy its evidence fields exactly.
 - **Don't invent URLs or paths.** Always parse them from the `COLLECT_READY` / `DIGEST_READY` lines.
 
 ## Edge cases
 
-- **Network/API failure during collect**: per-source failures are logged but don't abort. Empty categories show as 0 — report them as such.
+- **Network/API failure during collect**: per-source failures are logged but don't abort. Broken, blocked, oversized, or unreadable pages are listed under `items.json::link_validation.failures` and excluded from `pending.json`.
+- **Summary evidence mismatch**: `apply` replaces summaries whose `content_sha256` or `source_version` does not match the collected page. Regenerate only those entries from the current `pending.json`.
 - **No new items today** (`pending=0`): skip Step 4, just run `apply` (produces an HTML showing "本类今日无新内容" in each tab). Tell user this is normal — the dedup is working.
 - **Re-run same day**: dedup will filter most items, so `pending` will be small. Summarize only what's there.
+- **Same URL, new version**: version-aware dedup lets the item resurface. Always use the new `content.text` and evidence fields; never reuse the prior summary.
 - **`summaries.json` already exists from a prior run**: overwrite it. The apply stage uses the latest version.
 
 ## Project layout (for reference)
@@ -235,13 +256,13 @@ Per-category counts come from `data/wiki/YYYY-MM-DD.md`'s `## Contents` section.
 src/ai_daily_digest/
 ├── main.py            # `collect` and `apply` subcommands
 ├── sources/           # category fetchers + reddit (multi-category)
-│   ├── product_learning.py  # AI PM curriculum cards
+│   ├── product_learning.py  # auto-updating, source-tiered learning feeds
 │   ├── arxiv.py, ai_news.py, github_trending.py, llm_updates.py, claude_code.py, codex.py
 │   └── reddit.py      # routes subreddits → related categories
 ├── models.py          # Item, CATEGORIES, CATEGORY_LABELS
 ├── dedupe.py          # SQLite seen-set
 ├── scoring.py         # importance heuristic
-├── summarize.py       # OPTIONAL legacy API path (not used in skill mode)
+├── web_content.py     # link verification, page extraction, cache, version evidence
 ├── render_html.py     # Jinja2 → tabbed HTML; _split_hype handles ⚠️ line
 └── render_wiki.py     # markdown archive
 output/
@@ -251,6 +272,7 @@ output/
 └── digest-DATE.html             # final, opened in Step 6
 data/wiki/DATE.md                # markdown archive
 data/seen.db                     # incremental dedup state
+data/content-cache/              # conditional-GET cache, ignored by Git
 ```
 
 ## Manual invocation (debugging only)

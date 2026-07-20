@@ -5,8 +5,8 @@ Stages:
               (no LLM call; Claude reads pending.json and writes summaries.json)
   apply    →  load items.json + summaries.json + render HTML/wiki
 
-Legacy single-shot mode (with --use-api) is kept for users who set
-ANTHROPIC_API_KEY and want Python to do the LLM call. Default is skill mode.
+The Python stages never call an LLM. The active skill/model reads only the
+verified, versioned page text emitted in pending.json.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import sys
 from datetime import date as date_cls, datetime
 from pathlib import Path
 
-from . import dedupe, render_html, render_wiki, scoring
+from . import dedupe, render_html, render_wiki, scoring, web_content
 from .models import Item, CATEGORIES, CATEGORY_LABELS
 from .sources import FETCHERS, MULTI_CATEGORY_FETCHERS
 from .sources import reddit as reddit_source
@@ -79,6 +79,24 @@ def _select_for_summary(items: list[Item], k_per_cat: int) -> list[Item]:
     return selected
 
 
+def _dedupe_batch(items: list[Item]) -> list[Item]:
+    """Keep one category assignment for a URL before summary keys are created."""
+    chosen: dict[str, Item] = {}
+    order: list[str] = []
+    for item in items:
+        key = item.dedup_key()
+        if key not in chosen:
+            chosen[key] = item
+            order.append(key)
+            continue
+        old = chosen[key]
+        old_hits = len(old.raw_metrics.get("keyword_hits", []))
+        new_hits = len(item.raw_metrics.get("keyword_hits", []))
+        if new_hits > old_hits:
+            chosen[key] = item
+    return [chosen[key] for key in order]
+
+
 # ────────────────────────────── stage: collect ──────────────────────────────
 
 
@@ -120,24 +138,47 @@ def run_collect(
         except Exception as e:
             log.exception("multi-category source %s crashed: %s", name, e)
 
-    # 2. dedup
-    learning_items = [it for it in raw_items if it.raw_metrics.get("learning_card")]
-    news_items = [it for it in raw_items if not it.raw_metrics.get("learning_card")]
-    fresh = learning_items + store.filter_new(news_items)
-    deduped_count = len(raw_items) - len(fresh)
-    log.info("after dedup: %d fresh items (%d filtered as already-seen)",
+    # 2. Collapse same-run duplicates before fetching pages. The URL-level
+    # historical check happens after enrichment so updated source versions can
+    # resurface instead of being hidden forever by an old URL record.
+    raw_items = _dedupe_batch(raw_items)
+
+    # 3. Validate every public link and read the actual webpage. Items that
+    # cannot produce verifiable page text never reach the model or final digest.
+    checked_count = len(raw_items)
+    verified, link_failures = web_content.enrich_items(
+        raw_items,
+        cache_dir=DATA_DIR / "content-cache",
+    )
+    invalid_count = len(link_failures)
+    log.info("content validation: %d/%d verified, %d rejected",
+             len(verified), checked_count, invalid_count)
+
+    # 4. Version-aware historical deduplication. Only deep-read versions are
+    # recorded, so brief candidates still get another chance on later days.
+    fresh = store.filter_new(verified)
+    deduped_count = len(verified) - len(fresh)
+    log.info("after version-aware dedup: %d fresh items (%d filtered)",
              len(fresh), deduped_count)
 
-    # 3. score
+    # 5. score
     for it in fresh:
         it.score = scoring.score_item(it)
 
-    # 4. persist items + pending list
+    # 6. persist items + pending list
     date_str = on_date.isoformat()
+    deep_set = {it.url for it in _select_for_summary(fresh, top_k_summary)}
     items_data = {
         "date": date_str,
         "deduped_count": deduped_count,
         "reddit_status": reddit_source.LAST_STATUS,
+        "deep_urls": sorted(deep_set),
+        "link_validation": {
+            "checked": checked_count,
+            "verified": len(verified),
+            "rejected": invalid_count,
+            "failures": link_failures,
+        },
         "items": [it.to_dict() for it in fresh],
     }
     _items_path(date_str).write_text(
@@ -146,13 +187,13 @@ def run_collect(
 
     # All fresh items go into pending.json. Top-K are marked "deep" (four-section
     # summary); the rest are "brief" (single-sentence Chinese description).
-    deep_set = {it.url for it in _select_for_summary(fresh, top_k_summary)}
     pending_data = {
         "date": date_str,
         "note": "Claude reads this, writes back to summaries.json — see SKILL.md.",
         "schema": {
             "summary_mode": "'deep' → write 4-section summary; 'brief' → 1-sentence Chinese.",
-            "output_format": "{<url>: {title_zh: str, summary: str}}",
+            "input_rule": "Summarize only content.text, which was extracted from a verified webpage.",
+            "output_format": "{<url>: {title_zh, summary, content_sha256, source_version}}",
         },
         "items": [
             {
@@ -162,9 +203,26 @@ def run_collect(
                 "category_label": CATEGORY_LABELS.get(it.category, it.category),
                 "title": it.title,
                 "source": it.source,
+                "published_at": it.published_at.isoformat() if it.published_at else None,
                 "score": it.score,
                 "summary_mode": "deep" if it.url in deep_set else "brief",
-                "raw": (it.summary or "")[:1500],
+                "content": {
+                    "text": it.content,
+                    "content_url": it.provenance.get("content_url"),
+                    "final_url": it.provenance.get("final_url"),
+                    "http_status": it.provenance.get("http_status"),
+                    "content_sha256": it.provenance.get("content_sha256"),
+                    "content_chars": it.provenance.get("content_chars"),
+                    "retrieved_at": it.retrieved_at.isoformat() if it.retrieved_at else None,
+                    "source_version": it.source_version,
+                },
+                "source_metadata": {
+                    "source_tier": it.raw_metrics.get("source_tier"),
+                    "publisher": it.source,
+                    "discovery_feed": it.raw_metrics.get("discovery_feed"),
+                    "feed_version": it.raw_metrics.get("feed_version"),
+                    "source_config_version": it.raw_metrics.get("source_config_version"),
+                },
             }
             for it in fresh
         ],
@@ -172,16 +230,6 @@ def run_collect(
     _pending_path(date_str).write_text(
         json.dumps(pending_data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
-    # 5. record as seen — only items that get a deep summary count as "shown".
-    # Brief items aren't recorded, so they can re-surface and get another shot at
-    # top-K tomorrow. Prevents the failure mode where a slow-moving source (e.g.
-    # HF Daily Papers) gets fully consumed on day 1 and shows 0 items on day 2.
-    deep_items = [
-        it for it in fresh
-        if it.url in deep_set and not it.raw_metrics.get("learning_card")
-    ]
-    store.record(deep_items, on_date)
 
     log.info("items.json   : %s", _items_path(date_str))
     log.info("pending.json : %s (%d items: %d deep + %d brief)",
@@ -191,6 +239,7 @@ def run_collect(
     print(
         f"\nCOLLECT_READY items={len(fresh)} deduped={deduped_count} "
         f"pending={len(fresh)} deep={len(deep_set)} brief={len(fresh) - len(deep_set)} "
+        f"verified={len(verified)} invalid={invalid_count} "
         f"items_json={_items_path(date_str)} "
         f"pending_json={_pending_path(date_str)} "
         f"date={date_str}"
@@ -214,6 +263,7 @@ def run_apply(on_date: date_cls, quiet: bool) -> int:
     items = [Item.from_dict(d) for d in items_data["items"]]
     deduped_count = items_data.get("deduped_count", 0)
     reddit_status = items_data.get("reddit_status", "unknown")
+    deep_urls = set(items_data.get("deep_urls", []))
 
     # Merge in Claude-written summaries (optional — apply can run without them).
     # Accepts two value shapes:
@@ -230,6 +280,9 @@ def run_apply(on_date: date_cls, quiet: bool) -> int:
             if isinstance(entry, str):
                 it.llm_summary = entry
             elif isinstance(entry, dict):
+                if not _summary_matches_source(entry, it):
+                    log.warning("summary evidence mismatch, skipped: %s", it.url)
+                    continue
                 it.title_zh = entry.get("title_zh")
                 it.llm_summary = entry.get("summary")
             applied += 1
@@ -243,12 +296,24 @@ def run_apply(on_date: date_cls, quiet: bool) -> int:
                        _html_path(date_str), reddit_status=reddit_status)
     render_wiki.render(items, date_str, _wiki_path(date_str))
 
+    # Mark exposure only after a real, evidence-matched deep summary was
+    # successfully rendered. A failed summarization must remain eligible later.
+    completed_deep = []
+    for it in items:
+        if it.url not in deep_urls:
+            continue
+        entry = summaries.get(it.url) or summaries.get(it.dedup_key())
+        if _summary_matches_source(entry, it) and not _is_fallback_summary(entry):
+            completed_deep.append(it)
+    recorded = dedupe.SeenStore(DATA_DIR / "seen.db").record(completed_deep, on_date)
+    log.info("recorded %d evidence-matched deep items as seen", recorded)
+
     log.info("HTML : %s", _html_path(date_str))
     log.info("Wiki : %s", _wiki_path(date_str))
 
     # Surface fallback usage loudly. A high ratio means the summarize step
     # (Claude writing summaries.json) failed or was skipped — the digest will
-    # render, but every card reads "信息有限，需读原文". Don't let this pass silently.
+    # render, but every card reads "摘要生成失败". Don't let this pass silently.
     real = applied - fallback_count
     if fallback_count:
         ratio = fallback_count / applied if applied else 1.0
@@ -304,7 +369,8 @@ def _load_or_recover_summaries(
 
     missing = 0
     for it in items:
-        if it.url in summaries or it.dedup_key() in summaries:
+        existing = summaries.get(it.url) or summaries.get(it.dedup_key())
+        if existing is not None and _summary_matches_source(existing, it):
             continue
         summaries[it.url] = _fallback_summary(it)
         missing += 1
@@ -319,7 +385,7 @@ def _load_or_recover_summaries(
 
     # Count fallback text across the *whole* set, not just the ones we just
     # synthesized. This catches the failure mode where a prior step wrote a
-    # complete-but-placeholder summaries.json (every card = "信息有限，需读原文"),
+    # complete-but-placeholder summaries.json (every card = "摘要生成失败"),
     # which the `missing` counter alone would report as 0.
     fallback_count = 0
     for it in items:
@@ -331,8 +397,8 @@ def _load_or_recover_summaries(
 
 
 # Sentinel phrase every fallback summary contains; used to detect a
-# summaries.json that is structurally complete but semantically empty.
-_FALLBACK_MARKER = "信息有限，需读原文"
+# summaries.json that is structurally complete but has no model output.
+_FALLBACK_MARKER = "摘要生成失败"
 
 
 def _is_fallback_summary(entry) -> bool:
@@ -345,12 +411,21 @@ def _is_fallback_summary(entry) -> bool:
     return _FALLBACK_MARKER in text
 
 
+def _summary_matches_source(entry, item: Item) -> bool:
+    """Reject summaries produced from a different or unversioned page body."""
+    if not isinstance(entry, dict):
+        return False
+    expected_hash = item.provenance.get("content_sha256")
+    return bool(
+        expected_hash
+        and entry.get("content_sha256") == expected_hash
+        and entry.get("source_version") == item.source_version
+    )
+
+
 def _fallback_summary(it: Item) -> dict[str, str]:
     label = CATEGORY_LABELS.get(it.category, it.category)
     title_zh = it.title
-    raw = (it.summary or "").strip()
-    basis = raw[:160] if raw else f"原始信息主要来自标题：{it.title}"
-
     if it.category == "pm_practice":
         concept = "这条内容适合用来练习把用户任务、输入输出、流程节点、人工确认和成功指标写进 PRD。"
         pm_use = "阅读时重点标出用户要完成的任务、AI 参与的环节、失败时的兜底入口，以及可以验证价值的指标。"
@@ -370,10 +445,10 @@ def _fallback_summary(it: Item) -> dict[str, str]:
         concept = "这条内容适合用于建立行业判断：哪些能力在变强，哪些成本、监管、竞品或用户心智正在变化。"
         pm_use = "阅读时重点记录它对产品机会、风险、定价、渠道或用户需求优先级的影响。"
 
-    if it.raw_metrics.get("learning_card"):
-        happened = basis
-    else:
-        happened = f"信息有限，需读原文。这是一条「{label}」相关内容：{it.title}"
+    happened = (
+        f"摘要生成失败。链接和网页正文已经验证，但模型摘要没有成功绑定到当前版本；"
+        f"请从 pending.json 重新生成这条「{label}」内容。"
+    )
 
     return {
         "title_zh": title_zh,
@@ -383,6 +458,8 @@ def _fallback_summary(it: Item) -> dict[str, str]:
             f"③ **产品经理怎么用**：{pm_use}\n"
             f"④ **可以追问的问题**：这件事对应的真实用户任务是什么？上线前要用什么指标证明它真的有用？"
         ),
+        "content_sha256": str(it.provenance.get("content_sha256") or ""),
+        "source_version": str(it.source_version or ""),
     }
 
 
@@ -398,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--date", default=None, help="override date YYYY-MM-DD")
 
     pc = sub.add_parser("collect", parents=[common],
-                        help="fetch + dedup + score + emit items.json/pending.json")
+                        help="fetch + dedup + verify/read pages + score + emit JSON")
     pc.add_argument("--categories", default=",".join(CATEGORIES),
                     help="comma-separated subset of: " + ",".join(CATEGORIES))
     pc.add_argument("--limit-per-source", type=int, default=30)

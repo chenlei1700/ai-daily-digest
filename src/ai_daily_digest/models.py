@@ -16,6 +16,10 @@ class Item:
     author: str | None = None
     summary: str | None = None
     raw_metrics: dict[str, Any] = field(default_factory=dict)
+    content: str | None = None
+    source_version: str | None = None
+    retrieved_at: datetime | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
     score: float = 0.0
     title_zh: str | None = None       # filled in by Claude in skill mode
     llm_summary: str | None = None    # filled in by Claude in skill mode
@@ -27,14 +31,17 @@ class Item:
         d = asdict(self)
         if self.published_at is not None:
             d["published_at"] = self.published_at.isoformat()
+        if self.retrieved_at is not None:
+            d["retrieved_at"] = self.retrieved_at.isoformat()
         return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Item":
         d = dict(d)
-        pa = d.get("published_at")
-        if isinstance(pa, str):
-            d["published_at"] = datetime.fromisoformat(pa)
+        for key in ("published_at", "retrieved_at"):
+            value = d.get(key)
+            if isinstance(value, str):
+                d[key] = datetime.fromisoformat(value)
         return cls(**d)
 
 

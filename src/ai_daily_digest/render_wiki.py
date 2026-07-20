@@ -55,6 +55,12 @@ def render(items: list[Item], date_str: str, output_path: Path) -> None:
                 meta.append(f"{it.raw_metrics['points']} HN pts")
             if "stars" in it.raw_metrics:
                 meta.append(f"★{it.raw_metrics['stars']}")
+            if it.raw_metrics.get("source_tier"):
+                meta.append(f"tier: {it.raw_metrics['source_tier']}")
+            if it.source_version:
+                meta.append(f"version: {it.source_version}")
+            if it.retrieved_at:
+                meta.append(f"verified: {it.retrieved_at.strftime('%Y-%m-%d %H:%M UTC')}")
             lines.append("_" + " · ".join(meta) + "_")
             lines.append("")
             if it.llm_summary:

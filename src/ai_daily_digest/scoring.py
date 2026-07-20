@@ -65,8 +65,10 @@ def score_item(item: Item) -> float:
     base = 0.0
 
     if item.category in ("pm_practice", "model_limits", "ai_evals"):
-        if m.get("learning_card"):
-            base = 95.0 - m.get("curriculum_rank", 1)
+        if m.get("learning_material"):
+            tier_base = {"S": 82.0, "A": 70.0, "B": 56.0}
+            base = tier_base.get(m.get("source_tier"), 45.0)
+            base += min(len(m.get("keyword_hits", [])), 5) * 3.0
         elif "points" in m:
             base = math.log1p(m["points"]) * _HN_COEF
             base += min(m.get("num_comments", 0), 200) * 0.05
