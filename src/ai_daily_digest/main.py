@@ -1,12 +1,13 @@
-"""ai-daily-digest CLI — two-stage pipeline for skill-mode summarization.
+"""ai-daily-digest CLI pipeline for skill-mode summarization.
 
 Stages:
-  collect  →  fetch + dedup + score + dump items.json + pending.json
-              (no LLM call; Claude reads pending.json and writes summaries.json)
-  apply    →  load items.json + summaries.json + render HTML/wiki
+  collect          → fetch, verify, rank, and write bounded summary slices
+  prepare-slices   → rebuild bounded slices from an existing pending.json
+  merge-summaries  → validate and atomically merge model-written part files
+  apply            → load items.json + summaries.json + render HTML/wiki
 
 The Python stages never call an LLM. The active skill/model reads only the
-verified, versioned page text emitted in pending.json.
+verified, versioned page text emitted in bounded slice files.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ import sys
 from datetime import date as date_cls, datetime
 from pathlib import Path
 
-from . import dedupe, render_html, render_wiki, scoring, web_content
+from . import dedupe, render_html, render_wiki, scoring, summary_batches, web_content
 from .models import Item, CATEGORIES, CATEGORY_LABELS
 from .sources import FETCHERS, MULTI_CATEGORY_FETCHERS
 from .sources import reddit as reddit_source
@@ -67,6 +68,10 @@ def _summary_part_paths(date_str: str) -> list[Path]:
     return sorted(OUTPUT_DIR.glob(f"digest-{date_str}.summaries.part-*.json"))
 
 
+def _slices_manifest_path(date_str: str) -> Path:
+    return OUTPUT_DIR / "slices" / date_str / "manifest.json"
+
+
 def _select_for_summary(items: list[Item], k_per_cat: int) -> list[Item]:
     """Top-K per category by score — the pool Claude will summarize."""
     by_cat: dict[str, list[Item]] = {}
@@ -106,6 +111,10 @@ def run_collect(
     on_date: date_cls,
     top_k_summary: int,
     quiet: bool,
+    brief_content_chars: int = summary_batches.DEFAULT_BRIEF_CONTENT_CHARS,
+    slice_char_budget: int = summary_batches.DEFAULT_SLICE_CHAR_BUDGET,
+    slice_max_items: int = summary_batches.DEFAULT_SLICE_MAX_ITEMS,
+    max_parallel_agents: int = summary_batches.DEFAULT_MAX_PARALLEL_AGENTS,
 ) -> int:
     _setup_logging(quiet)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -187,62 +196,162 @@ def run_collect(
 
     # All fresh items go into pending.json. Top-K are marked "deep" (four-section
     # summary); the rest are "brief" (single-sentence Chinese description).
+    pending_items = []
+    for it in fresh:
+        summary_mode = "deep" if it.url in deep_set else "brief"
+        pending_item = {
+            "url": it.url,
+            "dedup_key": it.dedup_key(),
+            "category": it.category,
+            "category_label": CATEGORY_LABELS.get(it.category, it.category),
+            "title": it.title,
+            "source": it.source,
+            "published_at": it.published_at.isoformat() if it.published_at else None,
+            "score": it.score,
+            "summary_mode": summary_mode,
+            "content": {
+                "text": it.content,
+                "content_url": it.provenance.get("content_url"),
+                "final_url": it.provenance.get("final_url"),
+                "http_status": it.provenance.get("http_status"),
+                "content_sha256": it.provenance.get("content_sha256"),
+                "content_chars": it.provenance.get("content_chars"),
+                "retrieved_at": it.retrieved_at.isoformat() if it.retrieved_at else None,
+                "source_version": it.source_version,
+            },
+            "source_metadata": {
+                "source_tier": it.raw_metrics.get("source_tier"),
+                "publisher": it.source,
+                "discovery_feed": it.raw_metrics.get("discovery_feed"),
+                "feed_version": it.raw_metrics.get("feed_version"),
+                "source_config_version": it.raw_metrics.get("source_config_version"),
+            },
+        }
+        pending_items.append(
+            summary_batches.compact_pending_item(pending_item, brief_content_chars)
+        )
+
     pending_data = {
         "date": date_str,
-        "note": "Claude reads this, writes back to summaries.json — see SKILL.md.",
+        "note": (
+            "Claude reads generated slice files, writes manifest-provided part files, "
+            "then merge-summaries validates and creates summaries.json — see SKILL.md."
+        ),
         "schema": {
             "summary_mode": "'deep' → write 4-section summary; 'brief' → 1-sentence Chinese.",
-            "input_rule": "Summarize only content.text, which was extracted from a verified webpage.",
+            "input_rule": (
+                "Summarize only content.text, which is verified page text. "
+                "Brief items may contain a bounded leading excerpt; evidence fields still identify the full page."
+            ),
             "output_format": "{<url>: {title_zh, summary, content_sha256, source_version}}",
         },
-        "items": [
-            {
-                "url": it.url,
-                "dedup_key": it.dedup_key(),
-                "category": it.category,
-                "category_label": CATEGORY_LABELS.get(it.category, it.category),
-                "title": it.title,
-                "source": it.source,
-                "published_at": it.published_at.isoformat() if it.published_at else None,
-                "score": it.score,
-                "summary_mode": "deep" if it.url in deep_set else "brief",
-                "content": {
-                    "text": it.content,
-                    "content_url": it.provenance.get("content_url"),
-                    "final_url": it.provenance.get("final_url"),
-                    "http_status": it.provenance.get("http_status"),
-                    "content_sha256": it.provenance.get("content_sha256"),
-                    "content_chars": it.provenance.get("content_chars"),
-                    "retrieved_at": it.retrieved_at.isoformat() if it.retrieved_at else None,
-                    "source_version": it.source_version,
-                },
-                "source_metadata": {
-                    "source_tier": it.raw_metrics.get("source_tier"),
-                    "publisher": it.source,
-                    "discovery_feed": it.raw_metrics.get("discovery_feed"),
-                    "feed_version": it.raw_metrics.get("feed_version"),
-                    "source_config_version": it.raw_metrics.get("source_config_version"),
-                },
-            }
-            for it in fresh
-        ],
+        "items": pending_items,
     }
-    _pending_path(date_str).write_text(
+    pending_path = _pending_path(date_str)
+    pending_path.write_text(
         json.dumps(pending_data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    manifest, manifest_path = summary_batches.write_summary_slices(
+        pending_data,
+        pending_path,
+        OUTPUT_DIR,
+        brief_content_chars=brief_content_chars,
+        slice_char_budget=slice_char_budget,
+        slice_max_items=slice_max_items,
+        max_parallel_agents=max_parallel_agents,
     )
 
     log.info("items.json   : %s", _items_path(date_str))
     log.info("pending.json : %s (%d items: %d deep + %d brief)",
              _pending_path(date_str), len(fresh), len(deep_set), len(fresh) - len(deep_set))
+    log.info(
+        "summary slices: %s (%d slices, max %d parallel agents)",
+        manifest_path,
+        manifest["slice_count"],
+        manifest["recommended_parallel_agents"],
+    )
 
     # Machine-readable handoff line.
     print(
         f"\nCOLLECT_READY items={len(fresh)} deduped={deduped_count} "
         f"pending={len(fresh)} deep={len(deep_set)} brief={len(fresh) - len(deep_set)} "
         f"verified={len(verified)} invalid={invalid_count} "
+        f"slices={manifest['slice_count']} "
+        f"max_parallel={manifest['recommended_parallel_agents']} "
         f"items_json={_items_path(date_str)} "
         f"pending_json={_pending_path(date_str)} "
+        f"slices_manifest={manifest_path} "
         f"date={date_str}"
+    )
+    return 0
+
+
+def run_prepare_slices(
+    on_date: date_cls,
+    brief_content_chars: int,
+    slice_char_budget: int,
+    slice_max_items: int,
+    max_parallel_agents: int,
+    quiet: bool,
+) -> int:
+    _setup_logging(quiet)
+    date_str = on_date.isoformat()
+    pending_path = _pending_path(date_str)
+    if not pending_path.exists():
+        log.error("pending.json missing — run collect first: %s", pending_path)
+        return 3
+    try:
+        pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        manifest, manifest_path = summary_batches.write_summary_slices(
+            pending,
+            pending_path,
+            OUTPUT_DIR,
+            brief_content_chars=brief_content_chars,
+            slice_char_budget=slice_char_budget,
+            slice_max_items=slice_max_items,
+            max_parallel_agents=max_parallel_agents,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        log.error("could not prepare summary slices: %s", exc)
+        return 3
+
+    largest = max((spec["file_chars"] for spec in manifest["slices"]), default=0)
+    print(
+        f"\nSLICES_READY items={manifest['total_items']} "
+        f"slices={manifest['slice_count']} "
+        f"max_parallel={manifest['recommended_parallel_agents']} "
+        f"largest_chars={largest} manifest={manifest_path}"
+    )
+    return 0
+
+
+def run_merge_summaries(on_date: date_cls, quiet: bool) -> int:
+    _setup_logging(quiet)
+    date_str = on_date.isoformat()
+    manifest_path = _slices_manifest_path(date_str)
+    try:
+        report = summary_batches.merge_summary_parts(
+            manifest_path,
+            _summaries_path(date_str),
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        log.error("could not merge summary parts: %s", exc)
+        return 4
+
+    if not report["ok"]:
+        failed = ",".join(
+            str(failure["slice_id"]) for failure in report["failed_slices"]
+        )
+        print(
+            f"\nMERGE_INCOMPLETE expected={report['expected']} "
+            f"merged={report['merged']} failed_slices={failed} "
+            f"report={report['report_path']}"
+        )
+        return 4
+
+    print(
+        f"\nSUMMARIES_READY summaries={report['merged']} "
+        f"path={report['summaries_path']} report={report['report_path']}"
     )
     return 0
 
@@ -253,6 +362,18 @@ def run_collect(
 def run_apply(on_date: date_cls, quiet: bool) -> int:
     _setup_logging(quiet)
     date_str = on_date.isoformat()
+    manifest_path = _slices_manifest_path(date_str)
+    merge_report = None
+    if manifest_path.exists():
+        report_path = manifest_path.parent / "merge-report.json"
+        try:
+            merge_report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.error("summary merge gate missing or invalid: %s", exc)
+            return 4
+        if not isinstance(merge_report, dict) or not merge_report.get("ok"):
+            log.error("summary merge gate has not passed: %s", report_path)
+            return 4
 
     items_file = _items_path(date_str)
     if not items_file.exists():
@@ -290,6 +411,17 @@ def run_apply(on_date: date_cls, quiet: bool) -> int:
     else:
         log.warning("no summaries.json found at %s — rendering without LLM summaries",
                     summaries_file)
+
+    if merge_report is not None:
+        expected = int(merge_report.get("expected") or 0)
+        if fallback_count or applied != expected:
+            log.error(
+                "summary merge gate drifted after validation: expected=%d applied=%d fallback=%d",
+                expected,
+                applied,
+                fallback_count,
+            )
+            return 5
 
     # Render
     render_html.render(items, date_str, deduped_count, TEMPLATES_DIR,
@@ -480,7 +612,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma-separated subset of: " + ",".join(CATEGORIES))
     pc.add_argument("--limit-per-source", type=int, default=30)
     pc.add_argument("--top-k-summary", type=int, default=5,
-                    help="top-K items per category to include in pending.json")
+                    help="top-K items per category to receive a deep summary")
+    _add_summary_batch_arguments(pc)
+
+    pp = sub.add_parser(
+        "prepare-slices", parents=[common],
+        help="rebuild bounded summary slices from pending.json",
+    )
+    _add_summary_batch_arguments(pp)
+
+    sub.add_parser(
+        "merge-summaries", parents=[common],
+        help="validate all expected summary parts and atomically merge them",
+    )
 
     sub.add_parser("apply", parents=[common],
                    help="merge summaries.json + render HTML/wiki")
@@ -493,16 +637,80 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.cmd == "collect":
+        if not _valid_summary_batch_arguments(args):
+            return 2
         cats = [c.strip() for c in args.categories.split(",") if c.strip()]
         bad = [c for c in cats if c not in CATEGORIES]
         if bad:
             print(f"unknown categories: {bad}; valid: {CATEGORIES}", file=sys.stderr)
             return 2
         return run_collect(cats, args.limit_per_source, on_date,
-                           args.top_k_summary, args.quiet)
+                           args.top_k_summary, args.quiet,
+                           args.brief_content_chars, args.slice_char_budget,
+                           args.slice_max_items, args.max_parallel_agents)
+    elif args.cmd == "prepare-slices":
+        if not _valid_summary_batch_arguments(args):
+            return 2
+        return run_prepare_slices(
+            on_date,
+            args.brief_content_chars,
+            args.slice_char_budget,
+            args.slice_max_items,
+            args.max_parallel_agents,
+            args.quiet,
+        )
+    elif args.cmd == "merge-summaries":
+        return run_merge_summaries(on_date, args.quiet)
     elif args.cmd == "apply":
         return run_apply(on_date, args.quiet)
     return 1
+
+
+def _add_summary_batch_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--brief-content-chars",
+        type=int,
+        default=summary_batches.DEFAULT_BRIEF_CONTENT_CHARS,
+        help="verified leading page characters supplied to brief summaries",
+    )
+    parser.add_argument(
+        "--slice-char-budget",
+        type=int,
+        default=summary_batches.DEFAULT_SLICE_CHAR_BUDGET,
+        help="maximum serialized input characters per summary slice",
+    )
+    parser.add_argument(
+        "--slice-max-items",
+        type=int,
+        default=summary_batches.DEFAULT_SLICE_MAX_ITEMS,
+        help="maximum items per summary slice",
+    )
+    parser.add_argument(
+        "--max-parallel-agents",
+        type=int,
+        default=summary_batches.DEFAULT_MAX_PARALLEL_AGENTS,
+        help="recommended maximum simultaneous summary agents",
+    )
+
+
+def _valid_summary_batch_arguments(args: argparse.Namespace) -> bool:
+    names = (
+        "brief_content_chars",
+        "slice_char_budget",
+        "slice_max_items",
+        "max_parallel_agents",
+    )
+    invalid = [name for name in names if getattr(args, name) <= 0]
+    if invalid:
+        print(f"summary batch values must be positive: {invalid}", file=sys.stderr)
+        return False
+    if args.max_parallel_agents > summary_batches.MAX_PARALLEL_AGENTS_LIMIT:
+        print(
+            f"max_parallel_agents must be <= {summary_batches.MAX_PARALLEL_AGENTS_LIMIT}",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 if __name__ == "__main__":

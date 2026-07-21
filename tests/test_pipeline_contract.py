@@ -105,6 +105,24 @@ class PipelineContractTests(unittest.TestCase):
             self.assertEqual(store.filter_new([good]), [])
             self.assertEqual(store.filter_new([bad]), [bad])
 
+    def test_apply_requires_successful_merge_report_when_manifest_exists(self):
+        run_date = date(2026, 7, 21)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            output_dir = root / "output"
+            manifest_dir = output_dir / "slices" / "2026-07-21"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "manifest.json").write_text(
+                json.dumps({"date": "2026-07-21", "total_items": 1, "slices": []}),
+                encoding="utf-8",
+            )
+
+            with patch.object(main_module, "DATA_DIR", data_dir), patch.object(
+                main_module, "OUTPUT_DIR", output_dir
+            ):
+                self.assertEqual(main_module.run_apply(run_date, quiet=True), 4)
+
 
 if __name__ == "__main__":
     unittest.main()
