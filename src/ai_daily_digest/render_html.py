@@ -1,10 +1,12 @@
 """Render the categorized HTML brief."""
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup, escape
 
 from .models import Item, CATEGORIES, CATEGORY_LABELS
 
@@ -50,6 +52,7 @@ def render(
 
 def _view(it: Item) -> dict:
     main_summary, hype = _split_hype(it.llm_summary)
+    pushed_at = it.raw_metrics.get("pushed_at")
     return {
         "title": it.title_zh or it.title,
         "title_original": it.title if (it.title_zh and it.title_zh != it.title) else None,
@@ -59,9 +62,17 @@ def _view(it: Item) -> dict:
         "published_at": it.published_at.isoformat() if it.published_at else None,
         "raw_metrics": it.raw_metrics,
         "summary": it.summary,
-        "llm_summary": main_summary,
+        "llm_summary": _format_summary(main_summary),
         "hype_note": hype,
         "score": it.score,
+        "last_updated": _format_datetime(pushed_at or it.raw_metrics.get("updated_at")),
+        "source_tier": it.raw_metrics.get("source_tier"),
+        "source_version": it.source_version,
+        "retrieved_at": _format_datetime(
+            it.retrieved_at.isoformat() if it.retrieved_at else None
+        ),
+        "content_url": it.provenance.get("content_url"),
+        "content_verified": it.provenance.get("status") == "verified",
     }
 
 
@@ -75,3 +86,21 @@ def _split_hype(text: str | None) -> tuple[str | None, str | None]:
         if ln.startswith("⚠️") and "[hype:" in ln:
             return "\n".join(lines[:i]).strip(), ln
     return text, None
+
+
+def _format_summary(text: str | None) -> Markup | None:
+    if not text:
+        return None
+    escaped = escape(text)
+    # Keep the digest readable when summaries use lightweight Markdown bold.
+    return Markup(re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", str(escaped)))
+
+
+def _format_datetime(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return dt.strftime("%Y-%m-%d %H:%M")

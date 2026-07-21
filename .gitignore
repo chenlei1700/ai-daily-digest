@@ -4,6 +4,7 @@ data/reddit_cookie.txt
 # dedup state (don't share across machines)
 data/seen.db
 data/seen.db-journal
+data/content-cache/
 
 # generated outputs (regenerated daily)
 output/

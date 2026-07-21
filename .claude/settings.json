@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allowed": [
+      {
+        "type": "prompt",
+        "tool": "Agent",
+        "prompt": "*"
+      }
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 [project]
 name = "ai-daily-digest"
-version = "0.1.0"
-description = "Daily AI-domain digest across 5 categories with incremental dedup."
+version = "0.2.0"
+description = "Versioned, webpage-grounded AI learning digest across 9 categories."
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.14.3",
@@ -12,11 +12,6 @@ dependencies = [
     "markdown-it-py>=4.2.0",
     "python-dateutil>=2.9.0.post0",
 ]
-
-[project.optional-dependencies]
-# Only needed if you want the legacy API-call path (summarize.py).
-# In default skill mode, Claude writes summaries.json directly — no SDK needed.
-api = ["anthropic>=0.40.0"]
 
 [project.scripts]
 ai-daily-digest = "ai_daily_digest.main:main"

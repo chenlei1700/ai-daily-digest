@@ -1,47 +1,116 @@
 # ai-daily-digest
 
-A Claude Code skill that collects daily AI-domain updates across 5 categories, deduplicates against prior days, ranks by importance, summarizes via Claude itself (no API call), and renders a tabbed HTML brief opened in your browser — **all from a single phrase like "AI 日报"**.
+A Claude Code skill that collects daily AI-domain updates and turns them into a learning-oriented brief for junior AI product managers: model limits, AI evaluation, product requirements, industry news, tools, papers, and platform updates — **all from a single phrase like "AI 日报"**.
 
 ![Sample HTML output](docs/screenshot.png)
 
+_Actual local run on 2026-07-17: 118 items across 9 learning categories, with 65 previously exposed items removed by incremental deduplication._
+
 > Browse a [live sample HTML](examples/digest-example.html) (open in browser after clone) · or the [grep-friendly markdown wiki](examples/wiki-example.md) archive.
+
+## What changed in this fork
+
+Compared with the upstream `chenlei1700/ai-daily-digest`, this fork turns a general AI news brief into a learning and decision-support workflow for AI product managers:
+
+- **Auto-updating AI PM learning layer:** discovers recent materials for product methods, model limits, and AI evaluation from tiered first-party/research feeds instead of replaying fixed cards.
+- **Versioned webpage evidence:** validates every link, reads the public page, extracts the text, and records retrieval time, HTTP result, content hash, `ETag`/`Last-Modified` or product version before summarization.
+- **Exposure- and version-aware deduplication:** only successfully rendered, evidence-matched deep items enter `seen.db`; failed summaries and brief candidates can compete again later, and a previously read URL resurfaces when its meaningful source version changes.
+- **Higher-signal source strategy:** uses Hugging Face Daily Papers as the primary paper-discovery path with arXiv fallback, enriches GitHub metadata, and adds official/fallback paths for Claude Code and Codex updates.
+- **Load-bounded summarization workflow:** trims brief-mode input to a verified 6,000-character excerpt, splits work by serialized text size and item count, runs at most six summary agents at once, and retries only failed slices.
+- **Strict summary merge gate:** validates every part's JSON, URL coverage, required fields, content hash, and source version before atomically replacing `summaries.json`.
+- **Targeted failure recovery:** preserves completed parts, reports only the malformed, missing, stale, or timed-out slices for retry, and blocks degraded output from reaching the final digest.
+- **Operational automation:** improves GitHub authentication guidance, scheduled token injection, launchd installation, output lifecycle cleanup, and HTML + Markdown Wiki generation for both daily reading and long-term retrieval.
+
+The design goal is not to maximize the number of fetched links. It is to help an AI product manager repeatedly practice requirement framing, model-boundary judgment, evaluation design, and product application while keeping the workflow observable and recoverable.
 
 ## What it does
 
 ```
-[ Python: collect ]  →  pending.json  →  [ Claude: summarize ]  →  summaries.json  →  [ Python: apply ]  →  HTML
+[ collect + verify + bounded slices ] → [ Claude, max 6 slices at once ] → [ strict merge gate ] → [ apply ] → HTML
 ```
 
 When you say "AI 日报" / "今日 AI 简报" / "daily ai digest" in Claude Code, the skill:
 
-1. **Fetches** from 5 categorized sources in parallel
-2. **Deduplicates** against `data/seen.db` so the same item never appears twice across days
-3. **Ranks** items by an importance heuristic (HN points ≈ GitHub stars on the same scale)
-4. **Claude itself writes summaries** — no OpenAI/Anthropic API key needed
-5. **Renders** a single-file HTML with 5 category tabs + a markdown wiki entry for long-term archive
+1. **Fetches** from tiered AI PM learning feeds, HN, arXiv, GitHub, official AI blogs, Reddit, Claude Code, and Codex sources
+2. **Deduplicates** previously deep-read material against `data/seen.db`; brief candidates can compete again later
+3. **Verifies and reads** every candidate page, rejecting broken or unreadable links before they reach the model
+4. **Versions** extracted text with a content hash plus HTTP/product metadata and caches it for conditional revalidation
+5. **Ranks** every verified item by learning value, source tier, signal strength, and recency
+6. **Builds bounded summary slices** by actual serialized input size, not category count alone; brief items use a verified leading excerpt while deep items retain the full extracted text
+7. **Claude writes AI-PM-oriented summaries in controlled waves** of at most six agents — no extra LLM API call from Python
+8. **Validates and atomically merges every summary part** before checking evidence again and rendering HTML plus a Markdown archive
 
-### 5 categories
+### Categories
 
-| Category | Sources |
-|---|---|
-| 重要论文 (papers) | arXiv (cs.AI, cs.CL, cs.LG) |
-| AI 新闻 (news) | Hacker News + r/MachineLearning + r/singularity |
-| GitHub 热门 (trending) | GitHub Trending page filtered for AI relevance, sorted by **weekly new stars** (not cumulative) |
-| 大模型动态 (LLM updates) | HN + Hugging Face + r/LocalLLaMA |
-| Claude Code | `anthropics/claude-code` releases + commits + r/ClaudeAI |
+| Category | What you learn | Sources |
+|---|---|---|
+| AI 产品方法 | 需求拆解、PRD、用户任务、指标、人工兜底、Agent 产品设计 | Tiered official/research RSS feeds, refreshed on every collect |
+| 大模型边界 | 幻觉、Prompt Injection、上下文、记忆、权限、安全和失败模式 | Tiered official/research RSS feeds, refreshed on every collect |
+| AI 评测 | 离线评测、A/B、黄金集、回归集、LLM-as-judge、上线门槛 | Tiered official/research RSS feeds, refreshed on every collect |
+| 重要论文 | 把研究进展翻译成产品能力和未来机会 | arXiv / Hugging Face Daily Papers |
+| AI 新闻 | 行业变化、竞品动向、监管和商业化风险 | Hacker News + r/MachineLearning + r/singularity |
+| GitHub 热门 | 新工具、新工作流、新开源项目 | GitHub Trending filtered for AI relevance |
+| 大模型动态 | 模型发布、能力变化、价格/API、benchmark | Simon Willison RSS + OpenAI / Google DeepMind official blogs + HN keyword search |
+| Claude Code | AI coding agent 能力变化与工作流影响 | `anthropics/claude-code` releases + commits + r/ClaudeAI |
+| Codex | OpenAI Codex CLI / agent 工具变化 | OpenAI Codex releases/commits and related updates |
 
 Reddit sources are optional — see "Reddit fallback chain" below.
 
+The three learning tracks currently discover material from OpenAI, Google DeepMind, Microsoft Research, Hugging Face, LangChain, and Simon Willison. `S` means first-party lab/research material, `A` means established technical practice, and `B` means a consistently high-quality independent practitioner. Feed configuration is versioned in `product_learning.py`; only recent keyword-matched entries are eligible, and a per-publisher cap prevents one source from filling a whole category.
+
+## Link and source-version contract
+
+`collect` follows redirects and reads each candidate's real public page. A candidate is excluded when the URL is broken, blocked, larger than the safety limit, or does not yield enough readable text. For every accepted item, `pending.json` and its generated slices contain:
+
+- extracted `content.text`, never just a discovery snippet; brief items may contain a leading 6,000-character verified excerpt while deep items retain the full extracted text
+- final/content URL, HTTP status, retrieval timestamp, summary-input character count, full-page character count, and an `is_excerpt` flag
+- `content_sha256` for the full verified page version
+- `source_version`: release tag, commit SHA, arXiv id, repository push time, feed update time, HTTP validator, publication time, or hash-only fallback
+- discovery metadata such as publisher, source tier, feed version, and source-config version
+
+Claude must copy `content_sha256` and `source_version` into each summary. `merge-summaries` checks syntax, exact URL coverage, required fields, and both evidence values before atomically writing `summaries.json`; `apply` checks the evidence again. This prevents partial, malformed, or stale output from replacing a complete digest. Deduplication also compares `source_version`, so an updated release, commit, repository state, or versioned webpage can re-enter the digest even when its URL stays unchanged. Existing pre-0.2 database rows are migrated and backfilled without flooding the first upgraded run.
+
+## Bounded summarization and merge safety
+
+Earlier versions split large runs mainly by category and item count. That made
+similarly sized categories behave very differently: a category with 18 long
+webpages could become one 100k-token request, while many shorter items completed
+quickly. Starting every category worker at once also increased relay pressure,
+so one slow request or gateway timeout could hold up the whole digest.
+
+The current workflow uses deterministic limits instead:
+
+| Control | Default | Purpose |
+|---|---:|---|
+| Brief summary input | 6,000 verified characters | Avoid reading a 16k page to produce one sentence |
+| Slice input budget | 40,000 serialized characters | Keep one worker below large-context tool limits |
+| Items per slice | 8 | Bound output size and JSON repair cost |
+| Parallel workers | 6 maximum | Avoid overloading the inference relay |
+
+`collect` writes `output/slices/DATE/manifest.json`, which is the only work
+queue the skill follows. Workers run in bounded waves and write independent part
+files. `merge-summaries` then requires exact URL coverage, valid JSON, non-empty
+fields, and matching page hash/version values. It replaces `summaries.json`
+atomically only after every slice passes; otherwise it reports only the failed
+slices and preserves the last complete output. When a manifest exists, `apply`
+also refuses to render until this merge gate has passed.
+
+In a 169-item validation run, the new defaults produced 36 slices with zero
+oversized slices, reduced model-visible page text from about 1.29 million to
+886,664 characters, and kept the largest slice below 40,000 input characters.
+Deep summaries still use the full verified page text; the reduction comes from
+brief summaries and removal of repeated oversized reads.
+
 ## Sample output
 
-The HTML brief is a single-file, dependency-free page with 5 tabs:
+The HTML brief is a single-file, dependency-free page with learning tabs:
 
 ```
 ┌─ AI Daily Digest ────────────────────────────────────────────┐
 │ 2026-05-19 · 共 66 条（已增量去重 0 条）                       │
 ├──────────────────────────────────────────────────────────────┤
 │ [重要论文 15] [AI 新闻 15] [GitHub 热门 8]                     │
-│ [大模型动态 13] [Claude Code 15]                              │
+│ [大模型动态 13] [Claude Code 15] [Codex 5]                    │
 ├──────────────────────────────────────────────────────────────┤
 │ ╭──────────────────────────────────────────────────╮ ★ 64.6 │
 │ │ DashAttention：可微的自适应稀疏分层注意力             │       │
@@ -49,8 +118,9 @@ The HTML brief is a single-file, dependency-free page with 5 tabs:
 │ │ arXiv · Yuxiang Huang · 2026-05-18                │       │
 │ │ ─────────────────────────────────────────────    │       │
 │ │ ① 事实：提出端到端可微的稀疏分层注意力 ...           │       │
-│ │ ② 研究者视角：用 α-entmax 取代硬性 top-k ...        │       │
-│ │ ③ 工程师视角：值得做长上下文推理的团队 ...           │       │
+│ │ ② 你要学的概念：这是一次模型能力边界变化 ...         │       │
+│ │ ③ 产品经理怎么用：把它转成需求、指标和兜底 ...       │       │
+│ │ ④ 可以追问的问题：上线前如何验证失败率？             │       │
 │ ╰──────────────────────────────────────────────────╯       │
 │ ╭──────────────────────────────────────────────────╮ ★ 198 │
 │ │ openclaw/openclaw — Your own personal AI assist...│       │
@@ -60,7 +130,7 @@ The HTML brief is a single-file, dependency-free page with 5 tabs:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Three artifact files per day:
+Primary user-facing and internal artifacts:
 
 | File | Purpose |
 |---|---|
@@ -68,7 +138,7 @@ Three artifact files per day:
 | [`examples/wiki-example.md`](examples/wiki-example.md) | Long-term grep-able markdown archive |
 | `output/digest-DATE.items.json` | Raw fetched items + scores (internal) |
 
-The HTML has a dark theme that respects your OS theme, displays Chinese titles with English originals in muted text, three-section deep summaries (`①` 事实 / `②` 研究者视角 / `③` 工程师视角) for top items, single-sentence briefs for the rest, and `⚠️ [hype: ...]` annotations when titles contain marketing buzzwords.
+The HTML has a dark theme that respects your OS theme, displays Chinese titles with English originals in muted text, four-section learning summaries for top items, single-sentence briefs for the rest, source tier, verification time, source version, and `⚠️ [hype: ...]` annotations when pages contain marketing buzzwords.
 
 ## Output
 
@@ -76,32 +146,86 @@ The HTML has a dark theme that respects your OS theme, displays Chinese titles w
 output/
 ├── digest-YYYY-MM-DD.html               # tabbed brief, opened in browser
 ├── digest-YYYY-MM-DD.items.json         # full snapshot
-├── digest-YYYY-MM-DD.pending.json       # what Claude needs to summarize
-└── digest-YYYY-MM-DD.summaries.json     # Claude's output
+├── digest-YYYY-MM-DD.pending.json       # bounded summary input
+├── slices/YYYY-MM-DD/manifest.json      # exact slice queue + concurrency limit
+├── digest-YYYY-MM-DD.summaries.part-*.json # one worker result per slice
+└── digest-YYYY-MM-DD.summaries.json     # validated, atomically merged output
 data/
 ├── wiki/YYYY-MM-DD.md                   # markdown archive (grep-friendly)
 └── seen.db                              # incremental dedup
 ```
 
 The HTML has:
-- 5 category tabs, sorted by importance score
+- Learning tabs sorted by importance score
 - Chinese titles with English originals in parentheses
-- Three-section deep summaries (① 事实 / ② 研究者视角 / ③ 工程师视角) for top items
+- Four-section learning summaries for top items: what happened, concept, PM use, follow-up questions
 - One-sentence brief summaries for the rest
 - ⚠️ `[hype: ...]` annotations when titles contain marketing buzzwords
 
 ## Install
 
+### Prerequisites
+
+1. **Claude Code CLI** — [Install from anthropics/claude-code](https://github.com/anthropics/claude-code)
+2. **Python 3.11+** and **[uv](https://docs.astral.sh/uv/)**
+3. **GitHub CLI (recommended)** — Without it, GitHub-backed sources may be sparse due to GitHub API limits. Claude Code releases also have Atom/npm fallbacks, but `gh` is still recommended:
+   ```bash
+   brew install gh
+   gh auth login
+   ```
+4. **ANTHROPIC_AUTH_TOKEN** — Add to your shell rc file (`~/.zshrc` or `~/.bashrc`):
+   ```bash
+   export ANTHROPIC_AUTH_TOKEN="sk-ant-..."
+   export ANTHROPIC_BASE_URL="https://api.anthropic.com"  # or your relay URL
+   ```
+
+### Quick Install (macOS/Linux)
+
 ```bash
-# Clone
-git clone <your-fork-url> ai-daily-digest
+# Clone the fork, then enter the directory
+git clone https://github.com/1572135825-prog/ai-daily-digest.git
 cd ai-daily-digest
 
-# Install dependencies via uv
+# Install Python dependencies
 uv sync
+
+# Run interactive installer
+./install.sh
 ```
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+The installer will:
+- Check all dependencies and guide you through missing ones
+- Copy launcher script to `~/.local/bin/`
+- Link this directory into `~/.claude/skills/ai-daily-digest`
+- Generate launchd plists for daily digest (09:07) and cleanup (21:00)
+- Create `.claude/settings.json` for auto-permissions
+- Load the digest job and install 21:00 cleanup via launchd, with crontab fallback if launchd refuses the cleanup job
+
+Cleanup removes expired generated files under `output/` and `data/wiki/` after 24 hours. If both launchd and crontab refuse the 21:00 cleanup scheduler, the digest launcher still runs cleanup before each scheduled 09:07 digest as a last-resort fallback.
+
+### Manual Install
+
+If you prefer manual setup or are on Windows:
+
+```bash
+# 1. Symlink to Claude Code skills directory
+ln -s "$(pwd)" ~/.claude/skills/ai-daily-digest
+
+# 2. Create project-level permissions (avoids launchd hanging on Agent tool)
+mkdir -p .claude
+cat > .claude/settings.json << 'EOF'
+{
+  "permissions": {
+    "allowed": [
+      {"type": "prompt", "tool": "Agent", "prompt": "*"}
+    ]
+  }
+}
+EOF
+
+# 3. For launchd automation, manually edit and load the plist template
+#    (see install.sh for reference)
+```
 
 ## Use
 
@@ -125,13 +249,18 @@ Claude will run the full pipeline and open the HTML in your browser. See `SKILL.
 
 ```bash
 uv run python -m ai_daily_digest.main collect --quiet
-# Claude writes summaries to output/digest-DATE.summaries.json
+# Claude writes the manifest-provided summary part files in waves of at most 6
+uv run python -m ai_daily_digest.main merge-summaries --quiet
 uv run python -m ai_daily_digest.main apply --quiet
 ```
 
 CLI flags:
 - `--limit-per-source N` — items per source (default 30)
 - `--top-k-summary N` — items per category to get deep summary (default 5)
+- `--brief-content-chars N` — verified page characters supplied to brief summaries (default 6000)
+- `--slice-char-budget N` — maximum serialized input characters per slice (default 40000)
+- `--slice-max-items N` — maximum items per slice (default 8)
+- `--max-parallel-agents N` — concurrency limit recorded in the manifest (1-6, default 6)
 - `--categories arxiv,claude_code` — only fetch certain categories
 - `--date YYYY-MM-DD` — override date
 - `--quiet` — silence httpx logs
@@ -152,23 +281,27 @@ If all fail, the HTML shows an orange banner prompting login. To skip Reddit ent
 These are the two design knobs that determine output quality:
 
 - **Scoring** (`src/ai_daily_digest/scoring.py::score_item`) — decides ordering within each category. Default calibration: HN 1000 pts ≈ GitHub 10k stars ≈ score 100. Tweak weights for big-lab keywords (Anthropic / DeepMind / etc), recency decay, etc.
-- **Summary prompt** (`SKILL.md`, Step 4) — embedded directly in the skill so Claude reads & applies it each run. Adjust tone, length, hype-detection rules.
+- **Summary prompt** (`references/summary-agent.md`) — one shared worker contract for title, summary, evidence, JSON validation, and concise completion reporting. `SKILL.md` controls bounded waves, retry policy, and the merge gate.
 
 ## Architecture
 
 ```
 src/ai_daily_digest/
-├── main.py            # collect / apply subcommands
+├── main.py            # collect / prepare-slices / merge-summaries / apply
+├── summary_batches.py # bounded slice preparation + strict part merge
 ├── sources/           # one module per source
+│   ├── product_learning.py  (auto-updating, source-tiered learning feeds)
 │   ├── arxiv.py
 │   ├── ai_news.py     (Hacker News Algolia)
 │   ├── github_trending.py  (HTML scrape of /trending?since=weekly)
-│   ├── llm_updates.py
+│   ├── llm_updates.py  (Simon Willison + official AI lab blogs + HN keyword search)
 │   ├── claude_code.py
+│   ├── codex.py
 │   └── reddit.py      (4-tier fallback)
 ├── models.py          # Item dataclass + categories
 ├── dedupe.py          # SQLite seen-set
 ├── scoring.py         # importance heuristic
+├── web_content.py     # link checks, text extraction, content cache, source versions
 ├── render_html.py     # Jinja2 → single-file HTML
 └── render_wiki.py     # markdown archive
 ```
